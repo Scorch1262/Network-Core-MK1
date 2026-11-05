@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-#  Netzwerk-Core Installer v1.5.1 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
+#  Netzwerk-Core Installer v1.5.2 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
 #
 #  Einmal per SSH ausfuehren:   sh netzwerk-core-install.sh
 #
@@ -125,6 +125,33 @@ except Exception:
 open(f, "w", encoding="utf-8").write(out)
 print("changed")
 NC_PYPORT_EOF
+}
+
+# Das Router-Python (OpenWrt) hat nicht alle Standardmodule, z. B. kein "webbrowser".
+# Fehlt es, kommt ein Mini-Ersatz nach $BASE/pyshims (wird per PYTHONPATH eingebunden).
+ensure_pyshims() {
+    mkdir -p "$BASE/pyshims"
+    if python3 -c 'import webbrowser' 2>/dev/null && [ ! -f "$BASE/pyshims/.webbrowser_stub" ]; then
+        return 0
+    fi
+    if python3 -c 'import webbrowser' 2>/dev/null; then rm -f "$BASE/pyshims/webbrowser.py" "$BASE/pyshims/.webbrowser_stub"; return 0; fi
+    cat > "$BASE/pyshims/webbrowser.py" <<'NC_WB_EOF'
+"""Minimaler Ersatz fuer das fehlende Modul webbrowser (Netzwerk-Core, kein Browser auf dem Router)."""
+class Error(Exception):
+    pass
+
+def open(url, new=0, autoraise=True):
+    return False
+
+open_new = open_new_tab = open
+
+def get(using=None):
+    raise Error("kein Browser verfuegbar")
+
+def register(*args, **kwargs):
+    return None
+NC_WB_EOF
+    touch "$BASE/pyshims/.webbrowser_stub"
 }
 
 repo_path() { case "$1" in */*) echo "$1" ;; *) echo "$OWNER/$1" ;; esac; }
@@ -366,12 +393,13 @@ deploy_app() {   # id
         esac
     fi
 
+    ensure_pyshims
     # Startskript + Autostart (procd)
     cat > "$BASE/run/$id.sh" <<RUN_EOF
 #!/bin/sh
 cd "$workdir" || exit 1
 [ -r /etc/TZ ] && export TZ="\$(cat /etc/TZ)"
-export PYTHONPATH="$appdir/.pylibs" PYTHONUNBUFFERED=1
+export PYTHONPATH="$appdir/.pylibs:$BASE/pyshims" PYTHONUNBUFFERED=1
 exec env $envs $interp "$entry" $args
 RUN_EOF
     chmod +x "$BASE/run/$id.sh"
@@ -526,7 +554,7 @@ cat > "$BASE/bin/nc-core.py" <<'NC_CORE_EOF'
 import json, os, re, socket, subprocess, threading, time, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-NC_VERSION = "1.5.1"
+NC_VERSION = "1.5.2"
 BASE = os.environ.get("NC_BASE", "/root/Netzwerk-Core")
 PORT = int(os.environ.get("NC_PORT", "8090"))
 OWNER = "Scorch1262"
@@ -1355,6 +1383,17 @@ if [ "$SELF_UPDATE" = "1" ]; then
         if [ ! -f "$BASE/apps/$id/.nc_ok" ]; then
             log "Neue Anwendung: $id"
             deploy_app "$id" || log "Anwendung $id uebersprungen (siehe oben)"
+        fi
+    done
+    # Fehlende Python-Module (webbrowser) ersetzen; bestehende Startskripte anpassen
+    ensure_pyshims
+    for rs in "$BASE"/run/*.sh; do
+        [ -f "$rs" ] || continue
+        grep -q 'pyshims' "$rs" && continue
+        if grep -q 'PYTHONPATH=' "$rs"; then
+            sed -i "s#PYTHONPATH=\"\([^\"]*\)\"#PYTHONPATH=\"\1:$BASE/pyshims\"#" "$rs"
+            rid=$(basename "$rs" .sh)
+            netstat -lnt 2>/dev/null | grep -q ":$(app_field "$rid" 4) " || { log "Starte $rid neu (Python-Ersatzmodule)"; /etc/init.d/nc-$rid restart >/dev/null 2>&1; }
         fi
     done
     # Netzwerkplaner: neuer Port (8080 kollidiert mit der Router-Oberflaeche)

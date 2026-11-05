@@ -29,9 +29,11 @@ Ein-Klick-Einrichtung für einen **GL.iNet Brume 2 (GL-MT2500, OpenWrt)**: Das S
 Router per SSH erreichen (`ssh root@192.168.8.1`), Skript auf den Router kopieren und einmal ausführen:
 
 ```sh
-scp netzwerk-core-install.sh root@192.168.8.1:/root/
+scp -O -r netzwerk-core-install.sh root@192.168.8.1:/root/
 ssh root@192.168.8.1 "sh /root/netzwerk-core-install.sh"
 ```
+
+Der Schalter `-O` ist beim Brume 2 nötig: Neuere `scp`-Versionen übertragen per SFTP, das der Router (Dropbear) nicht anbietet. Mit `-O` nutzt `scp` das klassische Protokoll.
 
 Der Router braucht dafür Internet. Fehlt es, setzt sich die Installation beim nächsten Start automatisch fort. Das Log liegt unter `/root/Netzwerk-Core/install.log`.
 
