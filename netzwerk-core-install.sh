@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-#  Netzwerk-Core Installer v1.3.0 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
+#  Netzwerk-Core Installer v1.4.0 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
 #
 #  Einmal per SSH ausfuehren:   sh netzwerk-core-install.sh
 #
@@ -8,6 +8,11 @@
 #  WAN-Port in einer Bridge, IP per DHCP, DHCP-Server aus; per Statusseite oder
 #  "sh /root/Netzwerk-Core/bin/nc-network.sh dhcp-on" wieder einschaltbar).
 #  Mit  NC_SKIP_NETWORK=1 sh netzwerk-core-install.sh  wird die Umstellung ausgelassen.
+#
+#  Selbst-Update: Der Button "Skript aktualisieren" auf der Statusseite laedt die
+#  neueste Version dieses Skripts aus GitHub (Scorch1262/Network-Core-MK1) und
+#  fuehrt sie im Update-Modus (NC_SELF_UPDATE=1) aus: Hilfsskripte, Statusseite
+#  und App-Liste werden erneuert, Netzwerk und App-Daten bleiben unberuehrt.
 #
 #  Installiert: nano, mosquitto, 11 Anwendungen aus GitHub (Scorch1262),
 #  je Anwendung einen Autostart (procd) und die Statusseite "Netzwerk-Core"
@@ -20,10 +25,19 @@ BASE=/root/Netzwerk-Core
 [ "$(id -u)" = "0" ] || { echo "Bitte als root ausfuehren."; exit 1; }
 mkdir -p "$BASE/bin" "$BASE/apps" "$BASE/run"
 
+# Update-Modus (Selbst-Update): vorher Sicherung der Hilfsskripte fuer den Rollback
+SELF_UPDATE=${NC_SELF_UPDATE:-0}
+if [ "$SELF_UPDATE" = "1" ]; then
+    rm -rf "$BASE/backup-core"; mkdir -p "$BASE/backup-core"
+    cp -a "$BASE/bin" "$BASE/backup-core/bin" 2>/dev/null
+    cp -a "$BASE/apps.conf" "$BASE/backup-core/apps.conf" 2>/dev/null
+    cp -a "$BASE/shims" "$BASE/backup-core/shims" 2>/dev/null
+fi
+
 # ---------------------------------------------------------------------------
 # App-Liste:  id|Name|Repo|Port|Startdatei|Unterordner|Umgebung|Beschreibung
 # ---------------------------------------------------------------------------
-cat > "$BASE/apps.conf" <<'NC_APPS_EOF'
+cat > "$BASE/apps.conf.new" <<'NC_APPS_EOF'
 # id|Name|GitHub-Repo (nur Name = Scorch1262/Name, sonst Besitzer/Name)|Port|Startdatei (auto = automatisch, @datei = eigener Installer des Repos)|Unterordner|Umgebungsvariablen|Beschreibung|Startargumente
 flow|MQTT Flow-Planer|MQTT-Flow-Planer-MK1|8020|app.py|||MQTT-Ablaeufe als Blockschaltbild entwerfen
 dashboard|MQTT-Dashboard|MQTT-Dashboard-MK4|5001|app.py|||Graphen, Status-Anzeigen, Schalter und Slider
@@ -37,6 +51,21 @@ klingel|Klingelbildschirm|MQTT-Klingelbildschirm-MK3|8081|@install.sh|||Klingel-
 chat|Netzwerk-Chat|Netzwerk-Chat-MK1|8092|netzwerk_chat.py|||Chat fuer alle Teilnehmer im Netzwerk|--port 8092 --host 0.0.0.0
 homekit|HomeKit2MQTT|hobbyquaker/homekit2mqtt|51888|index.js|||HomeKit-Bridge fuer MQTT (Login: homekit + Pincode, siehe data/homekit/pincode)|-u mqtt://127.0.0.1 -s /root/Netzwerk-Core/data/homekit -m /root/Netzwerk-Core/data/homekit/map.json -p 51826 -w 51888 -b Netzwerk-Core -c $(cat /root/Netzwerk-Core/data/homekit/pincode) -a $(cat /root/Netzwerk-Core/data/homekit/username)
 NC_APPS_EOF
+
+# Vorhandene App-Liste mit der neuen zusammenfuehren: neue Liste gewinnt,
+# eigene (selbst ergaenzte) Zeilen mit unbekannter ID bleiben erhalten.
+if [ -f "$BASE/apps.conf" ]; then
+    cp "$BASE/apps.conf" "$BASE/apps.conf.bak"
+    cp "$BASE/apps.conf.new" "$BASE/apps.conf.merged"
+    grep -v -E '^[[:space:]]*(#|$)' "$BASE/apps.conf" | while IFS= read -r l; do
+        id=${l%%|*}
+        grep -q "^$id|" "$BASE/apps.conf.new" || echo "$l" >> "$BASE/apps.conf.merged"
+    done
+    mv -f "$BASE/apps.conf.merged" "$BASE/apps.conf"
+    rm -f "$BASE/apps.conf.new"
+else
+    mv -f "$BASE/apps.conf.new" "$BASE/apps.conf"
+fi
 
 # ---------------------------------------------------------------------------
 # Gemeinsame Shell-Funktionen (Installation + Update einer Anwendung)
@@ -353,6 +382,60 @@ log "Update beendet."
 NC_UPDATE_EOF
 
 # ---------------------------------------------------------------------------
+# Selbst-Update: neueste Version dieses Skripts aus GitHub holen und im
+# Update-Modus ausfuehren (wird von der Statusseite aufgerufen)
+# ---------------------------------------------------------------------------
+cat > "$BASE/bin/nc-selfupdate.sh" <<'NC_SELFUPDATE_EOF'
+#!/bin/sh
+# Auf eine Kopie umschalten: das Update ueberschreibt dieses Skript, waehrend es laeuft.
+if [ "$NC_SU_COPY" != "1" ]; then
+    cp "$0" /tmp/nc-selfupdate-run.sh && NC_SU_COPY=1 exec /bin/sh /tmp/nc-selfupdate-run.sh "$@"
+fi
+. /root/Netzwerk-Core/bin/nc-lib.sh
+SELF_REPO=Scorch1262/Network-Core-MK1
+SELF_FILE=netzwerk-core-install.sh
+
+fail() { log "FEHLER: $*"; rm -rf "$tmp"; log "Selbst-Update abgebrochen."; exit 1; }
+
+log "Selbst-Update gestartet"
+tmp=$(mktemp -d /tmp/nc-self.XXXXXX) || fail "kein temporaerer Ordner"
+f="$tmp/$SELF_FILE"
+
+got=0
+for br in main master; do
+    if gh_curl -o "$f" "https://raw.githubusercontent.com/$SELF_REPO/$br/$SELF_FILE" 2>/dev/null && [ -s "$f" ]; then got=1; break; fi
+done
+[ $got = 1 ] || fail "Skript konnte nicht von GitHub geladen werden ($SELF_REPO)"
+
+head -n1 "$f" | grep -q '^#!/bin/sh' || fail "heruntergeladene Datei ist kein Shell-Skript"
+sh -n "$f" 2>/dev/null || fail "heruntergeladenes Skript hat Syntaxfehler"
+grep -q 'NC_SELF_UPDATE' "$f" || fail "die Version auf GitHub kennt den Update-Modus nicht - bitte manuell ausfuehren"
+
+oldv=$(sed -n 's/^NC_VERSION = "\(.*\)"/\1/p' "$BASE/bin/nc-core.py" | head -n1)
+newv=$(sed -n 's/^NC_VERSION = "\(.*\)"/\1/p' "$f" | head -n1)
+log "Version: ${oldv:-?} -> ${newv:-?}"
+
+cp "$f" "$BASE/netzwerk-core-install.sh"
+if NC_SELF_UPDATE=1 NC_SKIP_NETWORK=1 /bin/sh "$f"; then
+    rm -rf "$tmp"
+    log "Selbst-Update auf Version ${newv:-?} abgeschlossen. Die Statusseite startet neu ..."
+    # Statusseite erst ganz zum Schluss neu starten (dieses Skript wird von ihr gestartet)
+    ( sleep 3; /etc/init.d/nc-core restart ) >/dev/null 2>&1 &
+    exit 0
+fi
+
+log "FEHLER beim Ausfuehren des neuen Skripts - stelle die vorherige Version wieder her"
+if [ -d "$BASE/backup-core/bin" ]; then
+    cp -f "$BASE"/backup-core/bin/* "$BASE/bin/" 2>/dev/null
+    [ -f "$BASE/backup-core/apps.conf" ] && cp -f "$BASE/backup-core/apps.conf" "$BASE/apps.conf"
+    log "Rollback abgeschlossen."
+fi
+rm -rf "$tmp"
+( sleep 3; /etc/init.d/nc-core restart ) >/dev/null 2>&1 &
+exit 1
+NC_SELFUPDATE_EOF
+
+# ---------------------------------------------------------------------------
 # Statusseite "Netzwerk-Core" (nur Python-Standardbibliothek)
 # ---------------------------------------------------------------------------
 cat > "$BASE/bin/nc-core.py" <<'NC_CORE_EOF'
@@ -361,7 +444,7 @@ cat > "$BASE/bin/nc-core.py" <<'NC_CORE_EOF'
 import json, os, re, socket, subprocess, threading, time, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-NC_VERSION = "1.3.0"
+NC_VERSION = "1.4.0"
 BASE = os.environ.get("NC_BASE", "/root/Netzwerk-Core")
 PORT = int(os.environ.get("NC_PORT", "8090"))
 OWNER = "Scorch1262"
@@ -369,6 +452,10 @@ CONF = os.path.join(BASE, "apps.conf")
 APPS_DIR = os.path.join(BASE, "apps")
 LOG = os.path.join(BASE, "update.log")
 UPDATE = os.path.join(BASE, "bin", "nc-update.sh")
+SELFUPDATE = os.path.join(BASE, "bin", "nc-selfupdate.sh")
+SELF_REPO = "Scorch1262/Network-Core-MK1"
+SELF_FILE = "netzwerk-core-install.sh"
+REMOTE_CORE = {"version": ""}
 
 REMOTE = {}
 _lock = threading.Lock()
@@ -484,8 +571,40 @@ def fetch_sha(repo):
     return ""
 
 
+def vtuple(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v or "")[:4])
+
+
+def fetch_core_version():
+    hdr = {"User-Agent": "netzwerk-core"}
+    tok = read(os.path.join(BASE, "github_token"), 200)
+    if tok:
+        hdr["Authorization"] = "token " + tok
+    for br in ("main", "master"):
+        try:
+            req = urllib.request.Request(
+                "https://raw.githubusercontent.com/%s/%s/%s" % (SELF_REPO, br, SELF_FILE), headers=hdr)
+            with urllib.request.urlopen(req, timeout=15) as r:
+                head = r.read(60000).decode("utf-8", "replace")
+            m = re.search(r'^NC_VERSION\s*=\s*"([^"]+)"', head, re.M)
+            if m:
+                return m.group(1)
+        except Exception:
+            continue
+    return ""
+
+
+def core_status():
+    rv = REMOTE_CORE["version"]
+    newer = bool(rv) and vtuple(rv) > vtuple(NC_VERSION)
+    return dict(version=NC_VERSION, remote=rv, update=newer)
+
+
 def refresher():
     while True:
+        v = fetch_core_version()
+        if v:
+            REMOTE_CORE["version"] = v
         for a in load_apps():
             s = fetch_sha(a["repo"])
             if s:
@@ -495,6 +614,19 @@ def refresher():
 
 def running():
     return _proc is not None and _proc.poll() is None
+
+
+def start_selfupdate():
+    global _proc
+    with _lock:
+        if running():
+            return False
+        f = open(LOG, "w")
+        # eigene Sitzung: das Skript startet die Statusseite am Ende selbst neu
+        _proc = subprocess.Popen(["/bin/sh", SELFUPDATE], stdout=f,
+                                 stderr=subprocess.STDOUT, start_new_session=True)
+        f.close()
+        return True
 
 
 def start_update(target):
@@ -541,7 +673,7 @@ pre{background:#0a0d11;border:1px solid var(--line);border-radius:10px;padding:1
 </style></head><body>
 <header>
  <div><h1>Netzwerk-Core</h1><div class="sub" id="info"></div></div>
- <div><button id="all" class="sec">Alle aktualisieren</button></div>
+ <div class="row" style="margin:0"><button id="self" class="sec">Skript aktualisieren</button><button id="all" class="sec">Alle aktualisieren</button></div>
 </header>
 <main>
  <div id="err"></div>
@@ -554,7 +686,8 @@ const $=s=>document.querySelector(s);
 let busy=false;
 function el(t,c,x){const e=document.createElement(t);if(c)e.className=c;if(x!==undefined)e.textContent=x;return e;}
 function render(d){
-  $('#info').textContent='Version '+d.version+' \u00b7 '+location.hostname;
+  const inf=$('#info');inf.textContent='Version '+d.version+' \u00b7 '+location.hostname;
+  if(d.core&&d.core.update){inf.append(' ');inf.append(el('span','badge','Skript-Update '+d.core.remote+' verf\u00fcgbar'));}
   busy=d.running;
   renderNet(d.net);
   const g=$('#grid');g.replaceChildren();
@@ -579,7 +712,7 @@ function render(d){
     }
     t.append(r);g.append(t);
   });
-  $('#all').disabled=busy;
+  $('#all').disabled=busy;$('#self').disabled=busy;
 }
 function renderNet(n){
   const box=$('#net');
@@ -615,6 +748,11 @@ async function upd(id){
   $('#log').hidden=false;load();
 }
 $('#all').onclick=()=>upd('all');
+$('#self').onclick=async()=>{
+  if(!confirm('Neue Version des Netzwerk-Core-Skripts von GitHub laden und installieren? Die Statusseite startet dabei kurz neu, Daten und Netzwerkeinstellungen bleiben erhalten.'))return;
+  await fetch('/api/selfupdate',{method:'POST'});
+  $('#log').hidden=false;load();
+};
 load();setInterval(load,4000);
 </script></body></html>
 """
@@ -639,7 +777,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, INDEX, "text/html")
         elif path == "/api/status":
             self._send(200, json.dumps(dict(version=NC_VERSION, running=running(),
-                                            net=net_status(), apps=all_status())))
+                                            net=net_status(), core=core_status(),
+                                            apps=all_status())))
         elif path == "/api/log":
             self._send(200, json.dumps(dict(running=running(), log=read(LOG)[-12000:])))
         else:
@@ -654,6 +793,9 @@ class Handler(BaseHTTPRequestHandler):
             subprocess.Popen(["/bin/sh", NET, "dhcp-" + mode], stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL)
             return self._send(200, json.dumps(dict(started=True)))
+        if u.path == "/api/selfupdate":
+            ok = start_selfupdate()
+            return self._send(200 if ok else 409, json.dumps(dict(started=ok)))
         if u.path != "/api/update":
             return self._send(404, json.dumps(dict(error="nicht gefunden")))
         target = urllib.parse.parse_qs(u.query).get("id", ["all"])[0]
@@ -960,23 +1102,7 @@ MQ_EOF
     # 5) Anwendungen
     for id in $(app_ids); do deploy_app "$id" || log "Anwendung $id uebersprungen (siehe oben)"; done
 
-    # 6) Statusseite
-    cat > /etc/init.d/nc-core <<CORE_EOF
-#!/bin/sh /etc/rc.common
-START=96
-STOP=10
-USE_PROCD=1
-start_service() {
-    procd_open_instance
-    procd_set_param command /usr/bin/python3 $BASE/bin/nc-core.py
-    procd_set_param env NC_PORT=8090 NC_BASE=$BASE
-    procd_set_param respawn 3600 5 0
-    procd_set_param stdout 1
-    procd_set_param stderr 1
-    procd_close_instance
-}
-CORE_EOF
-    chmod +x /etc/init.d/nc-core
+    # 6) Statusseite (Init-Skript /etc/init.d/nc-core wird vom Hauptskript angelegt)
     /etc/init.d/nc-core enable
     /etc/init.d/nc-core restart
 
@@ -998,6 +1124,44 @@ CORE_EOF
 NC_INSTALL_EOF
 
 chmod +x "$BASE"/bin/*.sh
+
+# ---------------------------------------------------------------------------
+# Autostart der Statusseite (auch im Update-Modus erneuert)
+# ---------------------------------------------------------------------------
+cat > /etc/init.d/nc-core <<CORE_EOF
+#!/bin/sh /etc/rc.common
+START=96
+STOP=10
+USE_PROCD=1
+start_service() {
+    procd_open_instance
+    procd_set_param command /usr/bin/python3 $BASE/bin/nc-core.py
+    procd_set_param env NC_PORT=8090 NC_BASE=$BASE
+    procd_set_param respawn 3600 5 0
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+}
+CORE_EOF
+chmod +x /etc/init.d/nc-core
+
+
+# ---------------------------------------------------------------------------
+# Update-Modus: nur Hilfsskripte/Statusseite erneuern, neue Apps nachinstallieren
+# (Netzwerk, Mosquitto-Konfiguration und App-Daten bleiben unberuehrt)
+# ---------------------------------------------------------------------------
+if [ "$SELF_UPDATE" = "1" ]; then
+    . "$BASE/bin/nc-lib.sh"
+    log "Update-Modus: Hilfsskripte und Statusseite erneuert"
+    for id in $(app_ids); do
+        if [ ! -f "$BASE/apps/$id/.nc_ok" ]; then
+            log "Neue Anwendung: $id"
+            deploy_app "$id" || log "Anwendung $id uebersprungen (siehe oben)"
+        fi
+    done
+    /etc/init.d/nc-core enable 2>/dev/null
+    exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # Selbstinstallation beim Start, solange nicht abgeschlossen
