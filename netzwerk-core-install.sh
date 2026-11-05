@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-#  Netzwerk-Core Installer v1.1.0 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
+#  Netzwerk-Core Installer v1.2.0 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
 #
 #  Einmal per SSH ausfuehren:   sh netzwerk-core-install.sh
 #
@@ -26,7 +26,7 @@ mkdir -p "$BASE/bin" "$BASE/apps" "$BASE/run"
 cat > "$BASE/apps.conf" <<'NC_APPS_EOF'
 # id|Name|GitHub-Repo|Port|Startdatei (auto = automatisch, @datei = eigener Installer des Repos)|Unterordner|Umgebungsvariablen|Beschreibung|Startargumente
 flow|MQTT Flow-Planer|MQTT-Flow-Planer-MK1|8020|app.py|||MQTT-Ablaeufe als Blockschaltbild entwerfen
-dashboard|MQTT-Dashboard|MQTT-Dashboard-MK3|5001|auto|Programme (py)||Graphen, Status-Anzeigen, Schalter und Slider
+dashboard|MQTT-Dashboard|MQTT-Dashboard-MK4|5001|app.py|||Graphen, Status-Anzeigen, Schalter und Slider
 makro|MQTT Makro-Zentrale|MQTT-Makro-Zentrale-MK1|8010|app.py|||MQTT-Makro-Ketten verwalten und ausfuehren
 diagram|MQTT-Diagram|MQTT-Diagram-MK1|5000|main.py||DASHBOARD_HOST=0.0.0.0 DASHBOARD_PORT=5000 DASHBOARD_OPEN_BROWSER=0|Live-Mindmap aller MQTT-Topics
 netzwerkplan|Netzwerkplaner|Netzwerkplaner-MK1|8080|app.py|||Netzwerkplanung und Dokumentation
@@ -143,6 +143,20 @@ deploy_app() {   # id
 
     mkdir -p "$appdir"
 
+    # Repo gewechselt (z. B. MQTT-Dashboard-MK3 -> MK4): alte Dateien entfernen,
+    # Einstellungen (*.json) vorher sichern und fuer die neue Version bereitstellen
+    oldrepo=$(cat "$appdir/.nc_repo" 2>/dev/null)
+    [ -z "$oldrepo" ] && [ -f "$appdir/.nc_ok" ] && oldrepo="MQTT-Dashboard-MK3"
+    if [ -n "$oldrepo" ] && [ "$oldrepo" != "$repo" ]; then
+        log "Repo-Wechsel $oldrepo -> $repo: Einstellungen werden uebernommen"
+        mkdir -p "$tmp/keep"
+        oldwd=$(cat "$appdir/.nc_workdir" 2>/dev/null); [ -d "$oldwd" ] || oldwd="$appdir"
+        for f in "$oldwd"/*.json "$appdir"/*.json; do [ -f "$f" ] && cp -n "$f" "$tmp/keep/"; done
+        /etc/init.d/nc-$id stop 2>/dev/null
+        find "$appdir" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+    fi
+    echo "$repo" > "$appdir/.nc_repo"
+
     # Repos mit eigenem Installer (z. B. Klingelbildschirm: ffmpeg, Autostart, Konfig)
     case "$entry" in
         @*)
@@ -172,6 +186,9 @@ deploy_app() {   # id
 
     workdir="$appdir"; [ -n "$subdir" ] && workdir="$appdir/$subdir"
     workdir=$(pick_workdir "$workdir")
+    if [ -d "$tmp/keep" ]; then
+        for f in "$tmp"/keep/*.json; do [ -f "$f" ] && cp -n "$f" "$workdir/"; done
+    fi
     old=$(cat "$appdir/.nc_workdir" 2>/dev/null)
     if [ -n "$old" ] && [ "$old" != "$workdir" ] && [ -d "$old" ]; then
         log "Neuer Versionsordner - uebernehme Einstellungen aus $old"
@@ -279,7 +296,7 @@ cat > "$BASE/bin/nc-core.py" <<'NC_CORE_EOF'
 import json, os, re, socket, subprocess, threading, time, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-NC_VERSION = "1.1.0"
+NC_VERSION = "1.2.0"
 BASE = os.environ.get("NC_BASE", "/root/Netzwerk-Core")
 PORT = int(os.environ.get("NC_PORT", "8090"))
 OWNER = "Scorch1262"
