@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-#  Netzwerk-Core Installer v1.2.0 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
+#  Netzwerk-Core Installer v1.3.0 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
 #
 #  Einmal per SSH ausfuehren:   sh netzwerk-core-install.sh
 #
@@ -9,7 +9,7 @@
 #  "sh /root/Netzwerk-Core/bin/nc-network.sh dhcp-on" wieder einschaltbar).
 #  Mit  NC_SKIP_NETWORK=1 sh netzwerk-core-install.sh  wird die Umstellung ausgelassen.
 #
-#  Installiert: nano, mosquitto, 10 Anwendungen aus GitHub (Scorch1262),
+#  Installiert: nano, mosquitto, 11 Anwendungen aus GitHub (Scorch1262),
 #  je Anwendung einen Autostart (procd) und die Statusseite "Netzwerk-Core"
 #  (Port 8090) mit Kacheln und Update-Buttons.
 #  Schlaegt etwas wegen fehlendem Internet fehl, laeuft die Installation beim
@@ -24,7 +24,7 @@ mkdir -p "$BASE/bin" "$BASE/apps" "$BASE/run"
 # App-Liste:  id|Name|Repo|Port|Startdatei|Unterordner|Umgebung|Beschreibung
 # ---------------------------------------------------------------------------
 cat > "$BASE/apps.conf" <<'NC_APPS_EOF'
-# id|Name|GitHub-Repo|Port|Startdatei (auto = automatisch, @datei = eigener Installer des Repos)|Unterordner|Umgebungsvariablen|Beschreibung|Startargumente
+# id|Name|GitHub-Repo (nur Name = Scorch1262/Name, sonst Besitzer/Name)|Port|Startdatei (auto = automatisch, @datei = eigener Installer des Repos)|Unterordner|Umgebungsvariablen|Beschreibung|Startargumente
 flow|MQTT Flow-Planer|MQTT-Flow-Planer-MK1|8020|app.py|||MQTT-Ablaeufe als Blockschaltbild entwerfen
 dashboard|MQTT-Dashboard|MQTT-Dashboard-MK4|5001|app.py|||Graphen, Status-Anzeigen, Schalter und Slider
 makro|MQTT Makro-Zentrale|MQTT-Makro-Zentrale-MK1|8010|app.py|||MQTT-Makro-Ketten verwalten und ausfuehren
@@ -35,6 +35,7 @@ outfit|Wetter-Outfit|Wetter-Outfit-Dashboard-MK1|8095|app.py|||Outfit-Vorschlaeg
 kachel|MQTT Kachel-Dashboard|MQTT-Kachel-Dashboard-MK1|8085|app.py|||MQTT-Topics als Kacheln mit Symbolen und Schwellwerten|
 klingel|Klingelbildschirm|MQTT-Klingelbildschirm-MK3|8081|@install.sh|||Klingel-Dashboard mit Kamerabild und Tueroeffner (Einrichtung: Port 8083)|
 chat|Netzwerk-Chat|Netzwerk-Chat-MK1|8092|netzwerk_chat.py|||Chat fuer alle Teilnehmer im Netzwerk|--port 8092 --host 0.0.0.0
+homekit|HomeKit2MQTT|hobbyquaker/homekit2mqtt|51888|index.js|||HomeKit-Bridge fuer MQTT (Login: homekit + Pincode, siehe data/homekit/pincode)|-u mqtt://127.0.0.1 -s /root/Netzwerk-Core/data/homekit -m /root/Netzwerk-Core/data/homekit/map.json -p 51826 -w 51888 -b Netzwerk-Core -c $(cat /root/Netzwerk-Core/data/homekit/pincode) -a $(cat /root/Netzwerk-Core/data/homekit/username)
 NC_APPS_EOF
 
 # ---------------------------------------------------------------------------
@@ -61,10 +62,12 @@ gh_curl() {
 app_ids()   { grep -v -E '^[[:space:]]*(#|$)' "$CONF" | cut -d'|' -f1; }
 app_field() { grep "^$1|" "$CONF" | head -n1 | cut -d'|' -f"$2"; }
 
+repo_path() { case "$1" in */*) echo "$1" ;; *) echo "$OWNER/$1" ;; esac; }
+
 remote_sha() {
     for br in main master; do
         s=$(gh_curl -H "Accept: application/vnd.github.sha" \
-            "https://api.github.com/repos/$OWNER/$1/commits/$br" 2>/dev/null | head -c 40)
+            "https://api.github.com/repos/$(repo_path "$1")/commits/$br" 2>/dev/null | head -c 40)
         case "$s" in
             [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) echo "$s"; return 0 ;;
         esac
@@ -74,7 +77,7 @@ remote_sha() {
 
 fetch_repo() {   # repo tmpdir
     for br in main master; do
-        if gh_curl -o "$2/src.tgz" "https://codeload.github.com/$OWNER/$1/tar.gz/refs/heads/$br"; then
+        if gh_curl -o "$2/src.tgz" "https://codeload.github.com/$(repo_path "$1")/tar.gz/refs/heads/$br"; then
             mkdir -p "$2/x" && tar -xzf "$2/src.tgz" -C "$2/x" && return 0
         fi
     done
@@ -122,6 +125,88 @@ resolve_entry() {   # workdir entry
     echo "$best"
 }
 
+# Python-Abhaengigkeiten je Anwendung isoliert in .pylibs
+python_deps() {
+    reqsrc="$workdir/requirements.txt"; [ -f "$reqsrc" ] || reqsrc="$appdir/requirements.txt"
+    if [ -f "$reqsrc" ]; then
+        grep -v -i -E '^[[:space:]]*(pyinstaller|#|$)' "$reqsrc" > "$tmp/req.txt"
+    elif [ -f "$workdir/Python.txt" ]; then
+        # Zeilen wie "py -3.11 -m pip install flask==3.0" -> "flask==3.0"
+        tr -d '\r' < "$workdir/Python.txt" | sed -n 's/.*pip install //p' | grep -v -i pyinstaller > "$tmp/req.txt"
+    else
+        : > "$tmp/req.txt"
+        grep -q -E '^[[:space:]]*(import|from)[[:space:]]+flask' "$workdir"/*.py 2>/dev/null && echo flask >> "$tmp/req.txt"
+        grep -q -E '^[[:space:]]*(import|from)[[:space:]]+paho' "$workdir"/*.py 2>/dev/null && echo paho-mqtt >> "$tmp/req.txt"
+    fi
+    if ! grep -q '[^[:space:]]' "$tmp/req.txt"; then
+        mkdir -p "$appdir/.pylibs"     # nur Standardbibliothek noetig
+        echo none > "$appdir/.nc_req"
+    fi
+    sum=$(md5sum "$tmp/req.txt" | cut -d' ' -f1)
+    if grep -q '[^[:space:]]' "$tmp/req.txt" && { [ "$sum" != "$(cat "$appdir/.nc_req" 2>/dev/null)" ] || [ ! -d "$appdir/.pylibs" ]; }; then
+        log "Installiere Python-Pakete ..."
+        if python3 -m pip install --no-cache-dir --disable-pip-version-check --upgrade \
+              --target "$appdir/.pylibs" -r "$tmp/req.txt"; then
+            echo "$sum" > "$appdir/.nc_req"
+        else
+            log "FEHLER: pip-Installation fehlgeschlagen"; return 1
+        fi
+    fi
+    interp=/usr/bin/python3
+    return 0
+}
+
+# Node.js-Anwendungen: node/npm per opkg, Pakete per npm. Native Module (kein C-Compiler
+# auf dem Router) werden durch die JavaScript-Ersatzmodule in $BASE/shims ersetzt.
+node_deps() {
+    if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+        log "Installiere Node.js (opkg: node, node-npm) ..."
+        opkg update >/dev/null 2>&1
+        opkg install node node-npm || { log "FEHLER: Pakete node/node-npm sind nicht installierbar"; return 1; }
+    fi
+    command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 || { log "FEHLER: node/npm fehlt"; return 1; }
+    log "Node.js $(node -v), npm $(npm -v)"
+    sum=$(md5sum "$workdir/package.json" 2>/dev/null | cut -d' ' -f1)
+    if [ "$sum" != "$(cat "$appdir/.nc_req" 2>/dev/null)" ] || [ ! -d "$workdir/node_modules" ]; then
+        log "Installiere Node-Pakete (npm, das dauert einige Minuten) ..."
+        if ! (cd "$workdir" && npm install --production --ignore-scripts --no-audit --no-fund --no-progress \
+                  --cache "$tmp/npmcache" tweetnacl@1.0.3); then
+            log "FEHLER: npm install fehlgeschlagen"; return 1
+        fi
+        echo "$sum" > "$appdir/.nc_req"
+    fi
+    # Ersatzmodule fuer native Pakete immer (erneut) einspielen
+    for sd in "$BASE"/shims/*/; do
+        m=$(basename "$sd")
+        find "$workdir/node_modules" -type d -name "$m" 2>/dev/null | while read -r t; do
+            rm -rf "$t"; cp -r "$sd" "$t"; log "JavaScript-Ersatz fuer natives Modul $m eingespielt"
+        done
+    done
+    interp=$(command -v node)
+    return 0
+}
+
+# HomeKit2MQTT: Pincode, Bridge-Kennung und Mapping-Datei einmalig anlegen (ausserhalb des Programmordners)
+init_homekit() {
+    d="$BASE/data/homekit"; mkdir -p "$d"
+    [ -f "$d/map.json" ] || echo '{}' > "$d/map.json"
+    if [ ! -s "$d/pincode" ]; then
+        i=0
+        while [ $i -lt 30 ]; do
+            i=$((i+1)); n=$(tr -dc '0-9' < /dev/urandom | head -c 8)
+            [ ${#n} -eq 8 ] || continue
+            case "$n" in 00000000|11111111|22222222|33333333|44444444|55555555|66666666|77777777|88888888|99999999|12345678|87654321) continue ;; esac
+            echo "$(echo "$n" | cut -c1-3)-$(echo "$n" | cut -c4-5)-$(echo "$n" | cut -c6-8)" > "$d/pincode"; break
+        done
+        [ -s "$d/pincode" ] || echo "482-17-306" > "$d/pincode"
+    fi
+    if [ ! -s "$d/username" ]; then
+        echo "CC:22:3D:$(tr -dc 'A-F0-9' < /dev/urandom | head -c 6 | sed 's/\(..\)\(..\)\(..\)/\1:\2:\3/')" > "$d/username"
+    fi
+    chmod 600 "$d/pincode"
+    log "HomeKit-Pincode: $(cat "$d/pincode")   (Datei: $d/pincode, Web-UI-Login: homekit / Pincode)"
+}
+
 # Anwendung installieren bzw. aktualisieren
 deploy_app() {   # id
     id="$1"
@@ -135,7 +220,7 @@ deploy_app() {   # id
     tmp=$(mktemp -d /tmp/nc.XXXXXX)
     sha=$(remote_sha "$repo")
     if ! fetch_repo "$repo" "$tmp"; then
-        log "FEHLER: Repo $OWNER/$repo nicht ladbar (privat oder Name falsch?). Bei privaten Repos Token in $BASE/github_token ablegen."
+        log "FEHLER: Repo $(repo_path "$repo") nicht ladbar (privat oder Name falsch?). Bei privaten Repos Token in $BASE/github_token ablegen."
         rm -rf "$tmp"; return 1
     fi
     src=$(ls -d "$tmp"/x/*/ 2>/dev/null | head -n1); src=${src%/}
@@ -146,7 +231,7 @@ deploy_app() {   # id
     # Repo gewechselt (z. B. MQTT-Dashboard-MK3 -> MK4): alte Dateien entfernen,
     # Einstellungen (*.json) vorher sichern und fuer die neue Version bereitstellen
     oldrepo=$(cat "$appdir/.nc_repo" 2>/dev/null)
-    [ -z "$oldrepo" ] && [ -f "$appdir/.nc_ok" ] && oldrepo="MQTT-Dashboard-MK3"
+    [ -z "$oldrepo" ] && [ "$id" = "dashboard" ] && [ -f "$appdir/.nc_ok" ] && oldrepo="MQTT-Dashboard-MK3"
     if [ -n "$oldrepo" ] && [ "$oldrepo" != "$repo" ]; then
         log "Repo-Wechsel $oldrepo -> $repo: Einstellungen werden uebernommen"
         mkdir -p "$tmp/keep"
@@ -202,32 +287,12 @@ deploy_app() {   # id
     fi
     log "Startdatei: $entry"
 
-    # Python-Abhaengigkeiten je Anwendung isoliert in .pylibs
-    reqsrc="$workdir/requirements.txt"; [ -f "$reqsrc" ] || reqsrc="$appdir/requirements.txt"
-    if [ -f "$reqsrc" ]; then
-        grep -v -i -E '^[[:space:]]*(pyinstaller|#|$)' "$reqsrc" > "$tmp/req.txt"
-    elif [ -f "$workdir/Python.txt" ]; then
-        # Zeilen wie "py -3.11 -m pip install flask==3.0" -> "flask==3.0"
-        tr -d '\r' < "$workdir/Python.txt" | sed -n 's/.*pip install //p' | grep -v -i pyinstaller > "$tmp/req.txt"
-    else
-        : > "$tmp/req.txt"
-        grep -q -E '^[[:space:]]*(import|from)[[:space:]]+flask' "$workdir"/*.py 2>/dev/null && echo flask >> "$tmp/req.txt"
-        grep -q -E '^[[:space:]]*(import|from)[[:space:]]+paho' "$workdir"/*.py 2>/dev/null && echo paho-mqtt >> "$tmp/req.txt"
-    fi
-    if ! grep -q '[^[:space:]]' "$tmp/req.txt"; then
-        mkdir -p "$appdir/.pylibs"     # nur Standardbibliothek noetig
-        echo none > "$appdir/.nc_req"
-    fi
-    sum=$(md5sum "$tmp/req.txt" | cut -d' ' -f1)
-    if grep -q '[^[:space:]]' "$tmp/req.txt" && { [ "$sum" != "$(cat "$appdir/.nc_req" 2>/dev/null)" ] || [ ! -d "$appdir/.pylibs" ]; }; then
-        log "Installiere Python-Pakete ..."
-        if python3 -m pip install --no-cache-dir --disable-pip-version-check --upgrade \
-              --target "$appdir/.pylibs" -r "$tmp/req.txt"; then
-            echo "$sum" > "$appdir/.nc_req"
-        else
-            log "FEHLER: pip-Installation fehlgeschlagen"; rm -rf "$tmp"; return 1
-        fi
-    fi
+    # Abhaengigkeiten (Python oder Node.js, je nach Startdatei)
+    case "$entry" in
+        *.js) node_deps ;;
+        *)    python_deps ;;
+    esac || { rm -rf "$tmp"; return 1; }
+    [ "$id" = "homekit" ] && init_homekit
 
     # Startskript + Autostart (procd)
     cat > "$BASE/run/$id.sh" <<RUN_EOF
@@ -235,7 +300,7 @@ deploy_app() {   # id
 cd "$workdir" || exit 1
 [ -r /etc/TZ ] && export TZ="\$(cat /etc/TZ)"
 export PYTHONPATH="$appdir/.pylibs" PYTHONUNBUFFERED=1
-exec env $envs /usr/bin/python3 "$entry" $args
+exec env $envs $interp "$entry" $args
 RUN_EOF
     chmod +x "$BASE/run/$id.sh"
 
@@ -296,7 +361,7 @@ cat > "$BASE/bin/nc-core.py" <<'NC_CORE_EOF'
 import json, os, re, socket, subprocess, threading, time, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-NC_VERSION = "1.2.0"
+NC_VERSION = "1.3.0"
 BASE = os.environ.get("NC_BASE", "/root/Netzwerk-Core")
 PORT = int(os.environ.get("NC_PORT", "8090"))
 OWNER = "Scorch1262"
@@ -343,6 +408,9 @@ def port_up(port):
 
 
 def app_version(wd):
+    m = re.search(r'"version"\s*:\s*"([^"]+)"', read(os.path.join(wd, "package.json"), 20000))
+    if m:
+        return m.group(1)
     for n in ("VERSION", "version.txt"):
         v = read(os.path.join(wd, n), 50)
         if v and len(v) < 30:
@@ -406,7 +474,7 @@ def fetch_sha(repo):
     for br in ("main", "master"):
         try:
             req = urllib.request.Request(
-                "https://api.github.com/repos/%s/%s/commits/%s" % (OWNER, repo, br), headers=hdr)
+                "https://api.github.com/repos/%s/commits/%s" % (repo if "/" in repo else OWNER + "/" + repo, br), headers=hdr)
             with urllib.request.urlopen(req, timeout=10) as r:
                 s = r.read().decode().strip()
             if re.fullmatch(r"[0-9a-f]{40}", s):
@@ -600,6 +668,106 @@ if __name__ == "__main__":
     threading.Thread(target=refresher, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 NC_CORE_EOF
+
+# ---------------------------------------------------------------------------
+# JavaScript-Ersatz fuer native Node-Module (der Router hat keinen C-Compiler).
+# hap-nodejs (HomeKit2MQTT) braucht ed25519-hap und curve25519-n; beide werden
+# hier mit tweetnacl nachgebildet (getestet gegen RFC 8032 / RFC 7748 und eine
+# echte HomeKit-Kopplung mit hap-controller).
+# ---------------------------------------------------------------------------
+mkdir -p "$BASE/shims/ed25519-hap" "$BASE/shims/curve25519-n"
+cat > "$BASE/shims/ed25519-hap/index.js" <<'NC_SHIM_ED_EOF'
+'use strict';
+// Reiner JavaScript-Ersatz fuer das native Modul "ed25519-hap" (Netzwerk-Core).
+// Gleiche Schnittstelle: MakeKeypair(seed), Sign(msg, seed|privateKey|keyPair), Verify(msg, sig, pub)
+// Der Router hat keinen C-Compiler, daher kommt tweetnacl (pures JS) zum Einsatz.
+const nacl = require('tweetnacl');
+
+const u8 = (b) => new Uint8Array(b.buffer, b.byteOffset, b.length);
+const buf = (u) => Buffer.from(u.buffer, u.byteOffset, u.length);
+
+function MakeKeypair(seed) {
+    if (!Buffer.isBuffer(seed) || seed.length !== 32) {
+        throw new Error('MakeKeypair requires a 32 byte buffer');
+    }
+    const kp = nacl.sign.keyPair.fromSeed(u8(seed));
+    return {publicKey: buf(kp.publicKey), privateKey: buf(kp.secretKey)};
+}
+
+function Sign(message, key) {
+    if (!Buffer.isBuffer(message) || key === undefined || key === null) {
+        throw new Error('Sign requires (Buffer, {Buffer(32 or 64) | keyPair object})');
+    }
+    let secret;
+    if (Buffer.isBuffer(key) && key.length === 32) {
+        secret = nacl.sign.keyPair.fromSeed(u8(key)).secretKey;
+    } else if (Buffer.isBuffer(key) && key.length === 64) {
+        secret = u8(key);
+    } else if (typeof key === 'object' && Buffer.isBuffer(key.privateKey)) {
+        secret = key.privateKey.length === 32 ?
+            nacl.sign.keyPair.fromSeed(u8(key.privateKey)).secretKey : u8(key.privateKey);
+    } else {
+        throw new Error('Sign requires (Buffer, {Buffer(32 or 64) | keyPair object})');
+    }
+    return buf(nacl.sign.detached(u8(message), secret));
+}
+
+function Verify(message, signature, publicKey) {
+    if (!Buffer.isBuffer(message) || !Buffer.isBuffer(signature) || !Buffer.isBuffer(publicKey) ||
+        signature.length !== 64 || publicKey.length !== 32) {
+        throw new Error('Verify requires (Buffer, Buffer(64), Buffer(32)');
+    }
+    try {
+        return nacl.sign.detached.verify(u8(message), u8(signature), u8(publicKey));
+    } catch (err) {
+        return false;
+    }
+}
+
+module.exports = {MakeKeypair, Sign, Verify};
+NC_SHIM_ED_EOF
+cat > "$BASE/shims/ed25519-hap/package.json" <<'NC_SHIM_EDP_EOF'
+{"name":"ed25519-hap","version":"0.0.5-js","main":"index.js","dependencies":{"tweetnacl":"1.0.3"}}
+NC_SHIM_EDP_EOF
+cat > "$BASE/shims/curve25519-n/index.js" <<'NC_SHIM_CV_EOF'
+'use strict';
+// Reiner JavaScript-Ersatz fuer das native Modul "curve25519-n" (Netzwerk-Core).
+// X25519 ueber tweetnacl - gleiche Schnittstelle wie das Original.
+const crypto = require('crypto');
+const nacl = require('tweetnacl');
+
+const u8 = (b) => new Uint8Array(b.buffer, b.byteOffset, b.length);
+const buf = (u) => Buffer.from(u.buffer, u.byteOffset, u.length);
+
+function makeSecretKey(mysecret) {
+    if (!Buffer.isBuffer(mysecret)) { throw new Error('mysecret must be a Buffer'); }
+    if (mysecret.length !== 32) { throw new Error('mysecret must be 32 bytes long'); }
+    // hap-nodejs 0.4.x uebergibt einen LEEREN Puffer und nutzt ihn danach als geheimen
+    // Schluessel (Rueckgabewert wird ignoriert). Deshalb: Puffer in-place befuellen,
+    // falls er nur Nullen enthaelt, danach in-place klemmen und zurueckgeben.
+    if (mysecret.every((x) => x === 0)) { crypto.randomFillSync(mysecret); }
+    mysecret[0] &= 248;
+    mysecret[31] &= 127;
+    mysecret[31] |= 64;
+    return mysecret;
+}
+
+function derivePublicKey(mysecret) {
+    if (mysecret.length !== 32) { throw new Error('mysecret must be 32 bytes long'); }
+    return buf(nacl.scalarMult.base(u8(mysecret)));
+}
+
+function deriveSharedSecret(mysecret, hispublic) {
+    if (mysecret.length !== 32) { throw new Error('mysecret must be 32 bytes long'); }
+    if (hispublic.length !== 32) { throw new Error('hispublic must be 32 bytes long'); }
+    return buf(nacl.scalarMult(u8(mysecret), u8(hispublic)));
+}
+
+module.exports = {makeSecretKey, derivePublicKey, deriveSharedSecret};
+NC_SHIM_CV_EOF
+cat > "$BASE/shims/curve25519-n/package.json" <<'NC_SHIM_CVP_EOF'
+{"name":"curve25519-n","version":"1.2.1-js","main":"index.js","dependencies":{"tweetnacl":"1.0.3"}}
+NC_SHIM_CVP_EOF
 
 # ---------------------------------------------------------------------------
 # Netzwerk: Brume 2 als reiner Netzwerkteilnehmer (kein Routing)
