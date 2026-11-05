@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-#  Netzwerk-Core Installer v1.4.0 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
+#  Netzwerk-Core Installer v1.5.0 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
 #
 #  Einmal per SSH ausfuehren:   sh netzwerk-core-install.sh
 #
@@ -43,7 +43,7 @@ flow|MQTT Flow-Planer|MQTT-Flow-Planer-MK1|8020|app.py|||MQTT-Ablaeufe als Block
 dashboard|MQTT-Dashboard|MQTT-Dashboard-MK4|5001|app.py|||Graphen, Status-Anzeigen, Schalter und Slider
 makro|MQTT Makro-Zentrale|MQTT-Makro-Zentrale-MK1|8010|app.py|||MQTT-Makro-Ketten verwalten und ausfuehren
 diagram|MQTT-Diagram|MQTT-Diagram-MK1|5000|main.py||DASHBOARD_HOST=0.0.0.0 DASHBOARD_PORT=5000 DASHBOARD_OPEN_BROWSER=0|Live-Mindmap aller MQTT-Topics
-netzwerkplan|Netzwerkplaner|Netzwerkplaner-MK1|8080|app.py|||Netzwerkplanung und Dokumentation
+netzwerkplan|Netzwerkplaner|Netzwerkplaner-MK1|8086|app.py|||Netzwerkplanung und Dokumentation
 bambu|Drucker-Dashboard|BambuLab-MQTT-Dashboard-MK6|8000|app.py|||Bambu Lab / Ultimaker / OctoPrint / Formlabs
 outfit|Wetter-Outfit|Wetter-Outfit-Dashboard-MK1|8095|app.py|||Outfit-Vorschlaege nach Wetter und Aktivitaet
 kachel|MQTT Kachel-Dashboard|MQTT-Kachel-Dashboard-MK1|8085|app.py|||MQTT-Topics als Kacheln mit Symbolen und Schwellwerten|
@@ -90,6 +90,33 @@ gh_curl() {
 
 app_ids()   { grep -v -E '^[[:space:]]*(#|$)' "$CONF" | cut -d'|' -f1; }
 app_field() { grep "^$1|" "$CONF" | head -n1 | cut -d'|' -f"$2"; }
+
+# Entfernte Dienste (werden bei "Alle aktualisieren" / Neuinstallation uebersprungen)
+is_removed() { grep -qx "$1" "$BASE/removed.list" 2>/dev/null; }
+mark_removed() { is_removed "$1" || echo "$1" >> "$BASE/removed.list"; }
+unmark_removed() {
+    [ -f "$BASE/removed.list" ] || return 0
+    grep -vx "$1" "$BASE/removed.list" > "$BASE/removed.list.t"; mv -f "$BASE/removed.list.t" "$BASE/removed.list"
+}
+active_ids() { for _i in $(app_ids); do is_removed "$_i" || echo "$_i"; done; }
+
+# Port in einer config.json ("server.port") setzen; gibt "changed" aus, wenn etwas geaendert wurde
+set_json_port() {   # datei port
+    [ -f "$1" ] || return 0
+    python3 - "$1" "$2" <<'NC_PYPORT_EOF'
+import json, sys
+f, p = sys.argv[1], int(sys.argv[2])
+try:
+    d = json.load(open(f, encoding="utf-8"))
+except Exception:
+    sys.exit(0)
+s = d.setdefault("server", {})
+if s.get("port") != p:
+    s["port"] = p
+    json.dump(d, open(f, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+    print("changed")
+NC_PYPORT_EOF
+}
 
 repo_path() { case "$1" in */*) echo "$1" ;; *) echo "$OWNER/$1" ;; esac; }
 
@@ -322,6 +349,8 @@ deploy_app() {   # id
         *)    python_deps ;;
     esac || { rm -rf "$tmp"; return 1; }
     [ "$id" = "homekit" ] && init_homekit
+    # Netzwerkplaner: Port steht in config.json (8080 kollidiert mit der Router-Oberflaeche)
+    [ "$id" = "netzwerkplan" ] && set_json_port "$workdir/config.json" "$port" >/dev/null
 
     # Startskript + Autostart (procd)
     cat > "$BASE/run/$id.sh" <<RUN_EOF
@@ -374,12 +403,50 @@ cat > "$BASE/bin/nc-update.sh" <<'NC_UPDATE_EOF'
 target="$1"
 log "Update gestartet: ${target:-all}"
 if [ -z "$target" ] || [ "$target" = "all" ]; then
-    for id in $(app_ids); do deploy_app "$id"; done
+    for id in $(active_ids); do deploy_app "$id"; done
 else
+    unmark_removed "$target"
     deploy_app "$target"
 fi
 log "Update beendet."
 NC_UPDATE_EOF
+
+# ---------------------------------------------------------------------------
+# Dienst deinstallieren (wird von der Statusseite aufgerufen)
+#   nc-uninstall.sh <id> keep     Dienst entfernen, Einstellungen/Daten behalten
+#   nc-uninstall.sh <id> delete   Dienst samt Daten entfernen
+# ---------------------------------------------------------------------------
+cat > "$BASE/bin/nc-uninstall.sh" <<'NC_UNINSTALL_EOF'
+#!/bin/sh
+. /root/Netzwerk-Core/bin/nc-lib.sh
+id="$1"; mode="${2:-keep}"
+name=$(app_field "$id" 2)
+[ -n "$name" ] || { log "Unbekannte Anwendung: $id"; exit 1; }
+appdir="$BASE/apps/$id"
+log "Deinstalliere $name (Daten: $([ "$mode" = delete ] && echo loeschen || echo behalten)) ..."
+
+# Autostart-Dienste stoppen und entfernen (eigener Dienst + ggf. vom Repo-Installer angelegte)
+for s in "/etc/init.d/nc-$id" $(grep -l -e "$appdir/" /etc/init.d/* 2>/dev/null); do
+    [ -f "$s" ] || continue
+    case "$s" in /etc/init.d/nc-core|/etc/init.d/nc-firstrun) continue ;; esac
+    "$s" stop >/dev/null 2>&1; "$s" disable >/dev/null 2>&1
+    rm -f "$s"; log "Dienst entfernt: $(basename "$s")"
+done
+# uebrig gebliebene Prozesse der Anwendung beenden
+for pid in $(ps 2>/dev/null | grep -F "$appdir/" | grep -v grep | awk '{print $1}'); do
+    [ "$pid" = "$$" ] || kill "$pid" 2>/dev/null
+done
+
+rm -f "$BASE/run/$id.sh" "$appdir/.nc_ok" "$appdir/.nc_sha" "$appdir/.nc_workdir"
+if [ "$mode" = "delete" ]; then
+    rm -rf "$appdir" "$BASE/data/$id"
+    log "Programmdateien und Daten geloescht."
+else
+    log "Einstellungen/Daten bleiben erhalten (bei erneuter Installation wieder da)."
+fi
+mark_removed "$id"
+log "$name wurde deinstalliert. Mit \"Installieren\" auf der Kachel jederzeit wieder einrichten."
+NC_UNINSTALL_EOF
 
 # ---------------------------------------------------------------------------
 # Selbst-Update: neueste Version dieses Skripts aus GitHub holen und im
@@ -444,7 +511,7 @@ cat > "$BASE/bin/nc-core.py" <<'NC_CORE_EOF'
 import json, os, re, socket, subprocess, threading, time, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-NC_VERSION = "1.4.0"
+NC_VERSION = "1.5.0"
 BASE = os.environ.get("NC_BASE", "/root/Netzwerk-Core")
 PORT = int(os.environ.get("NC_PORT", "8090"))
 OWNER = "Scorch1262"
@@ -494,22 +561,34 @@ def port_up(port):
         return False
 
 
-def app_version(wd):
-    m = re.search(r'"version"\s*:\s*"([^"]+)"', read(os.path.join(wd, "package.json"), 20000))
-    if m:
-        return m.group(1)
-    for n in ("VERSION", "version.txt"):
-        v = read(os.path.join(wd, n), 50)
-        if v and len(v) < 30:
-            return v
+VER_RE = re.compile(r"""^[ \t]*(?:APP_|__)?VERSION(?:__)?[ \t]*(?::[ \t]*str[ \t]*)?=[ \t]*['"]v?([0-9][^'"]*)['"]""", re.I | re.M)
+CHL_RE = re.compile(r"^#+[ \t]*\[?v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)", re.M)
+
+
+def app_version(wd, appdir=""):
+    for d in (wd, appdir):
+        if not d:
+            continue
+        m = re.search(r'"version"\s*:\s*"([^"]+)"', read(os.path.join(d, "package.json"), 20000))
+        if m:
+            return m.group(1)
+        for n in ("VERSION", "version.txt"):
+            v = read(os.path.join(d, n), 50)
+            if v and len(v) < 30:
+                return v.lstrip("vV")
     try:
         files = sorted(f for f in os.listdir(wd) if f.endswith(".py"))
     except OSError:
-        return ""
+        files = []
     for f in files:
-        m = re.search(r'APP_VERSION\s*=\s*["\']([^"\']+)', read(os.path.join(wd, f)))
+        m = VER_RE.search(read(os.path.join(wd, f)))
         if m:
             return m.group(1)
+    for d in (wd, appdir):
+        if d:
+            m = CHL_RE.search(read(os.path.join(d, "CHANGELOG.md"), 20000))
+            if m:
+                return m.group(1)
     return ""
 
 
@@ -522,7 +601,8 @@ def app_status(a):
     return dict(id=a["id"], name=a["name"], desc=a["desc"], port=a["port"],
                 web=True, manage=True, installed=installed,
                 up=port_up(a["port"]),
-                version=app_version(wd) if installed else "",
+                version=app_version(wd, d) if installed else "",
+                help=(a["id"] == "homekit"),
                 update=bool(installed and local and remote and local != remote))
 
 
@@ -536,6 +616,37 @@ def all_status():
 
 
 NET = os.path.join(BASE, "bin", "nc-network.sh")
+UNINSTALL = os.path.join(BASE, "bin", "nc-uninstall.sh")
+
+
+def help_homekit(host):
+    d = os.path.join(BASE, "data", "homekit")
+    pin = read(os.path.join(d, "pincode"), 40)
+    user = read(os.path.join(d, "username"), 40)
+    if not pin or not os.path.exists(os.path.join(APPS_DIR, "homekit", ".nc_ok")):
+        return dict(title="HomeKit2MQTT - Einrichtung", creds=[], tips=[], steps=[dict(
+            t="Noch nicht installiert",
+            d="HomeKit2MQTT ist nicht installiert. Auf der Kachel \"Installieren\" klicken; danach steht hier die Anleitung mit den Zugangsdaten.")])
+    digits = pin.replace("-", "")
+    creds = [["HomeKit-Code (Home-App)", pin + "  (manuell: " + digits + ")"],
+             ["Bridge-Name", "Netzwerk-Core"],
+             ["Bridge-ID", user],
+             ["Web-Oberfl\u00e4che", "http://%s:51888/" % host],
+             ["Web-Login Benutzer", "homekit"],
+             ["Web-Login Passwort", pin],
+             ["MQTT-Broker (dieser Router)", "%s:1883  (intern 127.0.0.1)" % host],
+             ["HomeKit-Port (TCP)", "51826"]]
+    steps = [
+        dict(t="Voraussetzungen", d="iPhone/iPad (Home-App) muss im selben Netzwerk sein wie der Router. Die Kachel HomeKit2MQTT muss mit gr\u00fcnem Punkt \"l\u00e4uft\" anzeigen."),
+        dict(t="Bridge in der Home-App hinzuf\u00fcgen", d="Home-App \u00f6ffnen \u2192 \"+\" \u2192 \"Gerät hinzuf\u00fcgen\" \u2192 \"Weitere Optionen\u2026\" \u2192 die Bridge \"Netzwerk-Core\" antippen. Die Meldung \"Nicht zertifiziertes Zubeh\u00f6r\" mit \"Trotzdem hinzuf\u00fcgen\" best\u00e4tigen."),
+        dict(t="Code eingeben", d="\"Code manuell eingeben\" w\u00e4hlen und den HomeKit-Code oben eintragen (%s). Danach Raum und Namen w\u00e4hlen und fertig." % digits),
+        dict(t="Web-Oberfl\u00e4che \u00f6ffnen", d="Auf der Kachel \"\u00d6ffnen\" klicken (oder %s im Browser aufrufen) und mit Benutzer \"homekit\" und dem Pincode als Passwort anmelden." % ("http://%s:51888/" % host)),
+        dict(t="Ger\u00e4te anlegen", d="In der Web-Oberfl\u00e4che ein neues Ger\u00e4t hinzuf\u00fcgen: Name, Typ (z. B. Lightbulb, Switch, TemperatureSensor) und die MQTT-Topics f\u00fcr Status (Werte vom Ger\u00e4t) und Setzen (Befehle an das Ger\u00e4t) eintragen und speichern. Als Broker dient der Mosquitto dieses Routers. Die Feldnamen k\u00f6nnen je nach Programmversion leicht abweichen."),
+        dict(t="Testen", d="Einen Wert ver\u00f6ffentlichen, z. B. mosquitto_pub -h %s -t <Status-Topic> -m <Wert>, und in der Home-App pr\u00fcfen, ob sich das Ger\u00e4t \u00e4ndert. Neue Ger\u00e4te erscheinen meist sofort, sonst die Home-App kurz schlie\u00dfen und neu \u00f6ffnen." % host)]
+    tips = ["Bridge wird nicht gefunden: gleiches Netzwerk/VLAN pr\u00fcfen, Port 51826 (TCP) und Multicast (Bonjour) m\u00fcssen durchgelassen werden; notfalls Router und iPhone neu starten.",
+            "Neu koppeln: Bridge in der Home-App entfernen, hier auf der Kachel \"Deinstallieren\" (Daten l\u00f6schen) und danach \"Installieren\". Es entstehen ein neuer Code und eine neue Bridge-ID, die hier dann automatisch angezeigt werden.",
+            "Die Zugangsdaten liegen auf dem Router in /root/Netzwerk-Core/data/homekit/ (pincode, username)."]
+    return dict(title="HomeKit2MQTT - Einrichtung", creds=creds, steps=steps, tips=tips)
 
 
 def sh(cmd):
@@ -616,6 +727,18 @@ def running():
     return _proc is not None and _proc.poll() is None
 
 
+def start_uninstall(target, mode):
+    global _proc
+    with _lock:
+        if running():
+            return False
+        f = open(LOG, "w")
+        _proc = subprocess.Popen(["/bin/sh", UNINSTALL, target, mode], stdout=f,
+                                 stderr=subprocess.STDOUT)
+        f.close()
+        return True
+
+
 def start_selfupdate():
     global _proc
     with _lock:
@@ -670,6 +793,19 @@ button:disabled{opacity:.45;cursor:not-allowed}
 a.off{background:#2f3a4a;pointer-events:none;opacity:.5}
 pre{background:#0a0d11;border:1px solid var(--line);border-radius:10px;padding:12px;max-height:320px;overflow:auto;font-size:12px;white-space:pre-wrap;margin-top:18px}
 #err{color:var(--bad)}
+button.del{background:#3a2326;color:#fca5a5}
+.row2{display:flex;gap:8px}.row2 button{flex:1;font-size:13px;padding:6px 10px}
+#modal{position:fixed;inset:0;background:rgba(0,0,0,.65);display:flex;align-items:flex-start;justify-content:center;padding:24px 12px;overflow:auto;z-index:9}
+#modal[hidden]{display:none}
+.box{background:var(--card);border:1px solid var(--line);border-radius:14px;max-width:720px;width:100%;padding:20px}
+.box h2{margin:0 0 12px;font-size:20px}
+.box h4{margin:18px 0 8px;font-size:14px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
+.cred{display:grid;grid-template-columns:minmax(150px,220px) 1fr;gap:4px 12px;font-size:14px}
+.cred span:nth-child(odd){color:var(--mut)}
+.cred span:nth-child(even){font-family:ui-monospace,Consolas,monospace;word-break:break-all;user-select:all}
+ol.steps{padding-left:22px;margin:0}ol.steps li{margin-bottom:12px}
+ol.steps b{display:block}ol.steps span{color:var(--mut);font-size:14px}
+ul.tips{margin:0;padding-left:20px;color:var(--mut);font-size:14px}ul.tips li{margin-bottom:8px}
 </style></head><body>
 <header>
  <div><h1>Netzwerk-Core</h1><div class="sub" id="info"></div></div>
@@ -681,6 +817,7 @@ pre{background:#0a0d11;border:1px solid var(--line);border-radius:10px;padding:1
  <div class="grid" id="grid"></div>
  <pre id="log" hidden></pre>
 </main>
+<div id="modal" hidden><div class="box" id="mbox"></div></div>
 <script>
 const $=s=>document.querySelector(s);
 let busy=false;
@@ -710,7 +847,14 @@ function render(d){
       const b=el('button','sec',a.installed?'Update':'Installieren');
       b.disabled=busy;b.onclick=()=>upd(a.id);r.append(b);
     }
-    t.append(r);g.append(t);
+    t.append(r);
+    if(a.installed&&(a.help||a.manage)){
+      const r2=el('div','row2');
+      if(a.help){const h=el('button','sec','\u2753 Hilfe');h.onclick=()=>help(a.id);r2.append(h);}
+      if(a.manage){const x=el('button','del','Deinstallieren');x.disabled=busy;x.onclick=()=>uninst(a);r2.append(x);}
+      t.append(r2);
+    }
+    g.append(t);
   });
   $('#all').disabled=busy;$('#self').disabled=busy;
 }
@@ -743,6 +887,31 @@ async function loadLog(){
   const d=await (await fetch('/api/log')).json();
   const p=$('#log');p.hidden=false;p.textContent=d.log||'';p.scrollTop=p.scrollHeight;
 }
+async function uninst(a){
+  if(!confirm(a.name+' deinstallieren? Dienst und Autostart werden entfernt.'))return;
+  const del=confirm('Auch alle Einstellungen und Daten von '+a.name+' l\u00f6schen?\n\nOK = alles l\u00f6schen\nAbbrechen = Daten behalten (bei erneuter Installation wieder vorhanden)');
+  await fetch('/api/uninstall?id='+encodeURIComponent(a.id)+'&data='+(del?'delete':'keep'),{method:'POST'});
+  $('#log').hidden=false;load();
+}
+async function help(id){
+  const d=await (await fetch('/api/help?id='+encodeURIComponent(id))).json();
+  const b=$('#mbox');b.replaceChildren(el('h2',null,d.title));
+  if(d.creds&&d.creds.length){
+    b.append(el('h4',null,'Zugangsdaten (aktuell)'));
+    const c=el('div','cred');d.creds.forEach(x=>c.append(el('span',null,x[0]),el('span',null,x[1])));b.append(c);
+  }
+  b.append(el('h4',null,'Schritt f\u00fcr Schritt'));
+  const ol=el('ol','steps');
+  d.steps.forEach(s=>{const li=el('li');li.append(el('b',null,s.t),el('span',null,s.d));ol.append(li);});
+  b.append(ol);
+  if(d.tips&&d.tips.length){
+    b.append(el('h4',null,'Probleme?'));
+    const ul=el('ul','tips');d.tips.forEach(t=>ul.append(el('li',null,t)));b.append(ul);
+  }
+  const x=el('button','sec','Schlie\u00dfen');x.style.marginTop='16px';x.onclick=()=>{$('#modal').hidden=true;};
+  b.append(x);$('#modal').hidden=false;
+}
+$('#modal').onclick=e=>{if(e.target.id==='modal')$('#modal').hidden=true;};
 async function upd(id){
   await fetch('/api/update?id='+encodeURIComponent(id),{method:'POST'});
   $('#log').hidden=false;load();
@@ -779,6 +948,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps(dict(version=NC_VERSION, running=running(),
                                             net=net_status(), core=core_status(),
                                             apps=all_status())))
+        elif path == "/api/help":
+            hid = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("id", [""])[0]
+            if hid != "homekit":
+                return self._send(404, json.dumps(dict(error="keine Hilfe vorhanden")))
+            host = (self.headers.get("Host") or "router").rsplit(":", 1)[0]
+            self._send(200, json.dumps(help_homekit(host)))
         elif path == "/api/log":
             self._send(200, json.dumps(dict(running=running(), log=read(LOG)[-12000:])))
         else:
@@ -793,6 +968,14 @@ class Handler(BaseHTTPRequestHandler):
             subprocess.Popen(["/bin/sh", NET, "dhcp-" + mode], stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL)
             return self._send(200, json.dumps(dict(started=True)))
+        if u.path == "/api/uninstall":
+            q = urllib.parse.parse_qs(u.query)
+            target = q.get("id", [""])[0]
+            mode = "delete" if q.get("data", ["keep"])[0] == "delete" else "keep"
+            if target not in [a["id"] for a in load_apps()]:
+                return self._send(400, json.dumps(dict(error="unbekannte Anwendung")))
+            ok = start_uninstall(target, mode)
+            return self._send(200 if ok else 409, json.dumps(dict(started=ok)))
         if u.path == "/api/selfupdate":
             ok = start_selfupdate()
             return self._send(200 if ok else 409, json.dumps(dict(started=ok)))
@@ -1100,7 +1283,7 @@ MQ_EOF
     /etc/init.d/mosquitto restart
 
     # 5) Anwendungen
-    for id in $(app_ids); do deploy_app "$id" || log "Anwendung $id uebersprungen (siehe oben)"; done
+    for id in $(active_ids); do deploy_app "$id" || log "Anwendung $id uebersprungen (siehe oben)"; done
 
     # 6) Statusseite (Init-Skript /etc/init.d/nc-core wird vom Hauptskript angelegt)
     /etc/init.d/nc-core enable
@@ -1153,12 +1336,20 @@ chmod +x /etc/init.d/nc-core
 if [ "$SELF_UPDATE" = "1" ]; then
     . "$BASE/bin/nc-lib.sh"
     log "Update-Modus: Hilfsskripte und Statusseite erneuert"
-    for id in $(app_ids); do
+    for id in $(active_ids); do
         if [ ! -f "$BASE/apps/$id/.nc_ok" ]; then
             log "Neue Anwendung: $id"
             deploy_app "$id" || log "Anwendung $id uebersprungen (siehe oben)"
         fi
     done
+    # Netzwerkplaner: neuer Port (8080 kollidiert mit der Router-Oberflaeche)
+    if [ -f "$BASE/apps/netzwerkplan/.nc_ok" ]; then
+        wd=$(cat "$BASE/apps/netzwerkplan/.nc_workdir" 2>/dev/null); [ -n "$wd" ] || wd="$BASE/apps/netzwerkplan"
+        if [ "$(set_json_port "$wd/config.json" "$(app_field netzwerkplan 4)")" = "changed" ]; then
+            log "Netzwerkplaner: Port auf $(app_field netzwerkplan 4) umgestellt"
+            /etc/init.d/nc-netzwerkplan restart >/dev/null 2>&1
+        fi
+    fi
     /etc/init.d/nc-core enable 2>/dev/null
     exit 0
 fi

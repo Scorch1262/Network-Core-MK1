@@ -16,7 +16,7 @@ Ein-Klick-Einrichtung für einen **GL.iNet Brume 2 (GL-MT2500, OpenWrt)**: Das S
 | MQTT-Dashboard (MK4) | 5001 |
 | MQTT Makro-Zentrale | 8010 |
 | MQTT-Diagram | 5000 |
-| Netzwerkplaner | 8080 |
+| Netzwerkplaner | 8086 (nicht 8080: dort läuft die Router-Oberfläche) |
 | Drucker-Dashboard (BambuLab MK6) | 8000 |
 | Wetter-Outfit | 8095 |
 | MQTT Kachel-Dashboard | 8085 |
@@ -55,6 +55,13 @@ Am Ende stellt das Skript den Router auf **Netzwerkteilnehmer ohne Routing** um:
 > Die Versionen vor 1.4.0 kennen den Update-Modus noch nicht: Einmalig die neue Version manuell ausführen, danach geht es per Button.
 
 Manuell im Update-Modus: `NC_SELF_UPDATE=1 sh netzwerk-core-install.sh`
+
+## Dienste deinstallieren und Hilfe
+
+- **Deinstallieren:** Jede Kachel hat einen Button *Deinstallieren*. Autostart und Dienst werden entfernt; auf Wunsch werden auch Einstellungen und Daten gelöscht (sonst bleiben sie für eine spätere Neuinstallation erhalten). Deinstallierte Dienste werden von *Alle aktualisieren* und beim Skript-Update nicht wieder installiert; mit *Installieren* auf der Kachel kommen sie zurück.
+- **HomeKit2MQTT-Hilfe:** Die Kachel hat einen Button *Hilfe* mit der Einrichtung Schritt für Schritt und den aktuellen Zugangsdaten (HomeKit-Code, Bridge-ID, Web-Login, Ports).
+
+![HomeKit2MQTT-Hilfe](docs/homekit-hilfe.png)
 
 ## Neue Anwendung hinzufügen
 
