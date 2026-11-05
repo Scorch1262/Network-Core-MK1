@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-#  Netzwerk-Core Installer fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
+#  Netzwerk-Core Installer v1.1.0 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
 #
 #  Einmal per SSH ausfuehren:   sh netzwerk-core-install.sh
 #
@@ -9,7 +9,7 @@
 #  "sh /root/Netzwerk-Core/bin/nc-network.sh dhcp-on" wieder einschaltbar).
 #  Mit  NC_SKIP_NETWORK=1 sh netzwerk-core-install.sh  wird die Umstellung ausgelassen.
 #
-#  Installiert: nano, mosquitto, 7 Anwendungen aus GitHub (Scorch1262),
+#  Installiert: nano, mosquitto, 10 Anwendungen aus GitHub (Scorch1262),
 #  je Anwendung einen Autostart (procd) und die Statusseite "Netzwerk-Core"
 #  (Port 8090) mit Kacheln und Update-Buttons.
 #  Schlaegt etwas wegen fehlendem Internet fehl, laeuft die Installation beim
@@ -24,7 +24,7 @@ mkdir -p "$BASE/bin" "$BASE/apps" "$BASE/run"
 # App-Liste:  id|Name|Repo|Port|Startdatei|Unterordner|Umgebung|Beschreibung
 # ---------------------------------------------------------------------------
 cat > "$BASE/apps.conf" <<'NC_APPS_EOF'
-# id|Name|GitHub-Repo|Port|Startdatei (auto = automatisch)|Unterordner|Umgebungsvariablen|Beschreibung
+# id|Name|GitHub-Repo|Port|Startdatei (auto = automatisch, @datei = eigener Installer des Repos)|Unterordner|Umgebungsvariablen|Beschreibung|Startargumente
 flow|MQTT Flow-Planer|MQTT-Flow-Planer-MK1|8020|app.py|||MQTT-Ablaeufe als Blockschaltbild entwerfen
 dashboard|MQTT-Dashboard|MQTT-Dashboard-MK3|5001|auto|Programme (py)||Graphen, Status-Anzeigen, Schalter und Slider
 makro|MQTT Makro-Zentrale|MQTT-Makro-Zentrale-MK1|8010|app.py|||MQTT-Makro-Ketten verwalten und ausfuehren
@@ -32,6 +32,9 @@ diagram|MQTT-Diagram|MQTT-Diagram-MK1|5000|main.py||DASHBOARD_HOST=0.0.0.0 DASHB
 netzwerkplan|Netzwerkplaner|Netzwerkplaner-MK1|8080|app.py|||Netzwerkplanung und Dokumentation
 bambu|Drucker-Dashboard|BambuLab-MQTT-Dashboard-MK6|8000|app.py|||Bambu Lab / Ultimaker / OctoPrint / Formlabs
 outfit|Wetter-Outfit|Wetter-Outfit-Dashboard-MK1|8095|app.py|||Outfit-Vorschlaege nach Wetter und Aktivitaet
+kachel|MQTT Kachel-Dashboard|MQTT-Kachel-Dashboard-MK1|8085|app.py|||MQTT-Topics als Kacheln mit Symbolen und Schwellwerten|
+klingel|Klingelbildschirm|MQTT-Klingelbildschirm-MK3|8081|@install.sh|||Klingel-Dashboard mit Kamerabild und Tueroeffner (Einrichtung: Port 8083)|
+chat|Netzwerk-Chat|Netzwerk-Chat-MK1|8092|netzwerk_chat.py|||Chat fuer alle Teilnehmer im Netzwerk|--port 8092 --host 0.0.0.0
 NC_APPS_EOF
 
 # ---------------------------------------------------------------------------
@@ -92,7 +95,7 @@ is_preserved() {
 # Dateien, die auf dem Router nicht gebraucht werden (Windows/Mac-Builds)
 is_skipped() {
     case "$1" in
-        .github/*|Release/*|"Programme (exe)"/*|packaging/*|*/Entwürfe/*|*/build/*) return 0 ;;
+        .github/*|Release/*|"Programme (exe)"/*|packaging/*|*/Entwürfe/*|*/build/*|offline_build_kit/*|brume2/*) return 0 ;;
         *.exe|*.zip|.DS_Store|*/.DS_Store|*.spec) return 0 ;;
     esac
     return 1
@@ -124,6 +127,7 @@ deploy_app() {   # id
     id="$1"
     name=$(app_field "$id" 2); repo=$(app_field "$id" 3); port=$(app_field "$id" 4)
     entry=$(app_field "$id" 5); subdir=$(app_field "$id" 6); envs=$(app_field "$id" 7)
+    args=$(app_field "$id" 9)
     [ -n "$repo" ] || { log "Unbekannte Anwendung: $id"; return 1; }
     appdir="$BASE/apps/$id"
     log "=== $name ($repo) ==="
@@ -138,6 +142,25 @@ deploy_app() {   # id
     [ -d "$src" ] || { log "FEHLER: Archiv leer"; rm -rf "$tmp"; return 1; }
 
     mkdir -p "$appdir"
+
+    # Repos mit eigenem Installer (z. B. Klingelbildschirm: ffmpeg, Autostart, Konfig)
+    case "$entry" in
+        @*)
+            inst="${entry#@}"
+            [ -f "$src/$inst" ] || { log "FEHLER: $inst fehlt im Repo"; rm -rf "$tmp"; return 1; }
+            log "Starte Installer des Repos ($inst) ..."
+            if ! (cd "$src" && sh "./$inst" </dev/null); then
+                log "FEHLER: $inst fehlgeschlagen"; rm -rf "$tmp"; return 1
+            fi
+            [ -f "$src/VERSION" ] && cp -f "$src/VERSION" "$appdir/VERSION"
+            echo "$sha" > "$appdir/.nc_sha"; touch "$appdir/.nc_ok"
+            rm -rf "$tmp"
+            sleep 5
+            if netstat -lnt 2>/dev/null | grep -q ":$port "; then log "OK: $name laeuft auf Port $port"
+            else log "WARNUNG: $name lauscht nicht auf Port $port - Log siehe Repo-Anleitung"; fi
+            return 0 ;;
+    esac
+
     (cd "$src" && find . -type f) | while read -r f; do
         f=${f#./}
         is_skipped "$f" && continue
@@ -170,10 +193,16 @@ deploy_app() {   # id
         # Zeilen wie "py -3.11 -m pip install flask==3.0" -> "flask==3.0"
         tr -d '\r' < "$workdir/Python.txt" | sed -n 's/.*pip install //p' | grep -v -i pyinstaller > "$tmp/req.txt"
     else
-        printf 'flask\npaho-mqtt\n' > "$tmp/req.txt"
+        : > "$tmp/req.txt"
+        grep -q -E '^[[:space:]]*(import|from)[[:space:]]+flask' "$workdir"/*.py 2>/dev/null && echo flask >> "$tmp/req.txt"
+        grep -q -E '^[[:space:]]*(import|from)[[:space:]]+paho' "$workdir"/*.py 2>/dev/null && echo paho-mqtt >> "$tmp/req.txt"
+    fi
+    if ! grep -q '[^[:space:]]' "$tmp/req.txt"; then
+        mkdir -p "$appdir/.pylibs"     # nur Standardbibliothek noetig
+        echo none > "$appdir/.nc_req"
     fi
     sum=$(md5sum "$tmp/req.txt" | cut -d' ' -f1)
-    if [ "$sum" != "$(cat "$appdir/.nc_req" 2>/dev/null)" ] || [ ! -d "$appdir/.pylibs" ]; then
+    if grep -q '[^[:space:]]' "$tmp/req.txt" && { [ "$sum" != "$(cat "$appdir/.nc_req" 2>/dev/null)" ] || [ ! -d "$appdir/.pylibs" ]; }; then
         log "Installiere Python-Pakete ..."
         if python3 -m pip install --no-cache-dir --disable-pip-version-check --upgrade \
               --target "$appdir/.pylibs" -r "$tmp/req.txt"; then
@@ -189,7 +218,7 @@ deploy_app() {   # id
 cd "$workdir" || exit 1
 [ -r /etc/TZ ] && export TZ="\$(cat /etc/TZ)"
 export PYTHONPATH="$appdir/.pylibs" PYTHONUNBUFFERED=1
-exec env $envs /usr/bin/python3 "$entry"
+exec env $envs /usr/bin/python3 "$entry" $args
 RUN_EOF
     chmod +x "$BASE/run/$id.sh"
 
@@ -250,7 +279,7 @@ cat > "$BASE/bin/nc-core.py" <<'NC_CORE_EOF'
 import json, os, re, socket, subprocess, threading, time, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-NC_VERSION = "1.0.0"
+NC_VERSION = "1.1.0"
 BASE = os.environ.get("NC_BASE", "/root/Netzwerk-Core")
 PORT = int(os.environ.get("NC_PORT", "8090"))
 OWNER = "Scorch1262"
