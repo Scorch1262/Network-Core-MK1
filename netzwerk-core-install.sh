@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-#  Netzwerk-Core Installer v1.5.0 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
+#  Netzwerk-Core Installer v1.5.1 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
 #
 #  Einmal per SSH ausfuehren:   sh netzwerk-core-install.sh
 #
@@ -104,17 +104,26 @@ active_ids() { for _i in $(app_ids); do is_removed "$_i" || echo "$_i"; done; }
 set_json_port() {   # datei port
     [ -f "$1" ] || return 0
     python3 - "$1" "$2" <<'NC_PYPORT_EOF'
-import json, sys
+import json, re, sys
 f, p = sys.argv[1], int(sys.argv[2])
+raw = open(f, "rb").read().decode("utf-8-sig", "replace")   # auch Dateien mit BOM (Windows-Editor)
 try:
-    d = json.load(open(f, encoding="utf-8"))
-except Exception:
-    sys.exit(0)
-s = d.setdefault("server", {})
-if s.get("port") != p:
+    d = json.loads(raw)
+    s = d.setdefault("server", {})
+    if s.get("port") == p:
+        sys.exit(0)
     s["port"] = p
-    json.dump(d, open(f, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
-    print("changed")
+    out = json.dumps(d, indent=2, ensure_ascii=False)
+except Exception:
+    # kein gueltiges JSON: Port im Textbereich "server" per Textersetzung setzen
+    m = re.search(r'("server"\s*:\s*\{[^}]*?"port"\s*:\s*)(\d+)', raw, re.S)
+    if not m:
+        print("error"); sys.exit(0)
+    if int(m.group(2)) == p:
+        sys.exit(0)
+    out = raw[:m.start(2)] + str(p) + raw[m.end(2):]
+open(f, "w", encoding="utf-8").write(out)
+print("changed")
 NC_PYPORT_EOF
 }
 
@@ -350,7 +359,12 @@ deploy_app() {   # id
     esac || { rm -rf "$tmp"; return 1; }
     [ "$id" = "homekit" ] && init_homekit
     # Netzwerkplaner: Port steht in config.json (8080 kollidiert mit der Router-Oberflaeche)
-    [ "$id" = "netzwerkplan" ] && set_json_port "$workdir/config.json" "$port" >/dev/null
+    if [ "$id" = "netzwerkplan" ]; then
+        case "$(set_json_port "$workdir/config.json" "$port")" in
+            changed) log "Port in config.json auf $port gesetzt" ;;
+            error)   log "WARNUNG: Port in $workdir/config.json nicht aenderbar - bitte \"port\": $port unter \"server\" selbst eintragen" ;;
+        esac
+    fi
 
     # Startskript + Autostart (procd)
     cat > "$BASE/run/$id.sh" <<RUN_EOF
@@ -389,6 +403,7 @@ INIT_EOF
         log "OK: $name laeuft auf Port $port"
     else
         log "WARNUNG: $name lauscht nicht auf Port $port - Log: logread | grep nc-$id"
+        logread 2>/dev/null | grep -F "nc-$id" | tail -n 8 | while IFS= read -r l; do log "  | $l"; done
     fi
     return 0
 }
@@ -511,7 +526,7 @@ cat > "$BASE/bin/nc-core.py" <<'NC_CORE_EOF'
 import json, os, re, socket, subprocess, threading, time, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-NC_VERSION = "1.5.0"
+NC_VERSION = "1.5.1"
 BASE = os.environ.get("NC_BASE", "/root/Netzwerk-Core")
 PORT = int(os.environ.get("NC_PORT", "8090"))
 OWNER = "Scorch1262"
