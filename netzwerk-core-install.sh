@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-#  Netzwerk-Core Installer v1.5.3 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
+#  Netzwerk-Core Installer v1.5.4 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
 #
 #  Einmal per SSH ausfuehren:   sh netzwerk-core-install.sh
 #
@@ -342,12 +342,26 @@ deploy_app() {   # id
             log "Starte Installer des Repos ($inst) ..."
             (cd "$src" && sh "./$inst" </dev/null); rc=$?
             [ $rc -ne 0 ] && log "HINWEIS: $inst endete mit Code $rc - pruefe, ob der Dienst trotzdem laeuft"
-            # Vom Repo-Installer angelegte Dienste neu starten, damit die neue Version wirklich laeuft
+            # Vom Repo-Installer angelegte Dienste sauber neu starten: erst alle stoppen, uebrig gebliebene
+            # (verwaiste) Prozesse der alten Version beenden, dann starten - sonst laeuft die alte Version weiter
+            svs=""
             for sv in $(grep -il -e "$id" -e doorbell /etc/init.d/* 2>/dev/null); do
                 case "$sv" in /etc/init.d/nc-core|/etc/init.d/nc-firstrun) continue ;; esac
-                [ -x "$sv" ] || continue
-                log "Starte Dienst neu: $(basename "$sv")"
-                "$sv" restart >/dev/null 2>&1
+                [ -x "$sv" ] && svs="$svs $sv"
+            done
+            for sv in $svs; do "$sv" stop >/dev/null 2>&1; done
+            sleep 2
+            for sig in TERM KILL; do
+                for pid in $(ps 2>/dev/null | grep -i -e "$id" -e doorbell | grep -v -e grep -e Netzwerk-Core | awk '{print $1}'); do
+                    [ "$pid" = "$$" ] && continue
+                    [ "$sig" = TERM ] && log "Beende alten Prozess $pid"
+                    kill -$sig "$pid" 2>/dev/null
+                done
+                sleep 2
+            done
+            for sv in $svs; do
+                log "Starte Dienst: $(basename "$sv")"
+                "$sv" start >/dev/null 2>&1
             done
             sleep 6
             if netstat -lnt 2>/dev/null | grep -q ":$port "; then
@@ -565,7 +579,7 @@ cat > "$BASE/bin/nc-core.py" <<'NC_CORE_EOF'
 import json, os, re, socket, subprocess, threading, time, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-NC_VERSION = "1.5.3"
+NC_VERSION = "1.5.4"
 BASE = os.environ.get("NC_BASE", "/root/Netzwerk-Core")
 PORT = int(os.environ.get("NC_PORT", "8090"))
 OWNER = "Scorch1262"
