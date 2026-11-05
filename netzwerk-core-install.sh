@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-#  Netzwerk-Core Installer v1.5.2 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
+#  Netzwerk-Core Installer v1.5.3 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
 #
 #  Einmal per SSH ausfuehren:   sh netzwerk-core-install.sh
 #
@@ -340,15 +340,26 @@ deploy_app() {   # id
             inst="${entry#@}"
             [ -f "$src/$inst" ] || { log "FEHLER: $inst fehlt im Repo"; rm -rf "$tmp"; return 1; }
             log "Starte Installer des Repos ($inst) ..."
-            if ! (cd "$src" && sh "./$inst" </dev/null); then
-                log "FEHLER: $inst fehlgeschlagen"; rm -rf "$tmp"; return 1
+            (cd "$src" && sh "./$inst" </dev/null); rc=$?
+            [ $rc -ne 0 ] && log "HINWEIS: $inst endete mit Code $rc - pruefe, ob der Dienst trotzdem laeuft"
+            # Vom Repo-Installer angelegte Dienste neu starten, damit die neue Version wirklich laeuft
+            for sv in $(grep -il -e "$id" -e doorbell /etc/init.d/* 2>/dev/null); do
+                case "$sv" in /etc/init.d/nc-core|/etc/init.d/nc-firstrun) continue ;; esac
+                [ -x "$sv" ] || continue
+                log "Starte Dienst neu: $(basename "$sv")"
+                "$sv" restart >/dev/null 2>&1
+            done
+            sleep 6
+            if netstat -lnt 2>/dev/null | grep -q ":$port "; then
+                log "OK: $name laeuft auf Port $port"
+            elif [ $rc -ne 0 ]; then
+                log "FEHLER: $inst fehlgeschlagen und $name lauscht nicht auf Port $port"; rm -rf "$tmp"; return 1
+            else
+                log "WARNUNG: $name lauscht nicht auf Port $port - Log siehe Repo-Anleitung"
             fi
             [ -f "$src/VERSION" ] && cp -f "$src/VERSION" "$appdir/VERSION"
             echo "$sha" > "$appdir/.nc_sha"; touch "$appdir/.nc_ok"
             rm -rf "$tmp"
-            sleep 5
-            if netstat -lnt 2>/dev/null | grep -q ":$port "; then log "OK: $name laeuft auf Port $port"
-            else log "WARNUNG: $name lauscht nicht auf Port $port - Log siehe Repo-Anleitung"; fi
             return 0 ;;
     esac
 
@@ -554,7 +565,7 @@ cat > "$BASE/bin/nc-core.py" <<'NC_CORE_EOF'
 import json, os, re, socket, subprocess, threading, time, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-NC_VERSION = "1.5.2"
+NC_VERSION = "1.5.3"
 BASE = os.environ.get("NC_BASE", "/root/Netzwerk-Core")
 PORT = int(os.environ.get("NC_PORT", "8090"))
 OWNER = "Scorch1262"
