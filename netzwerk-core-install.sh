@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-#  Netzwerk-Core Installer v1.6.0 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
+#  Netzwerk-Core Installer v1.6.1 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
 #
 #  Einmal per SSH ausfuehren:   sh netzwerk-core-install.sh
 #
@@ -532,17 +532,28 @@ fi
 SELF_REPO=Scorch1262/Network-Core-MK1
 SELF_FILE=netzwerk-core-install.sh
 
-fail() { log "FEHLER: $*"; rm -rf "$tmp"; log "Selbst-Update abgebrochen."; exit 1; }
+say() { log "$*"; echo "$*" > "$BASE/selfupdate.last"; }
+fail() { say "FEHLER: $* - Selbst-Update abgebrochen."; rm -rf "$tmp"; exit 1; }
 
 log "Selbst-Update gestartet"
 tmp=$(mktemp -d /tmp/nc-self.XXXXXX) || fail "kein temporaerer Ordner"
 f="$tmp/$SELF_FILE"
 
+# Download ohne CDN-Cache: erst GitHub-API (immer aktuell), dann raw mit Cache-Umgehung
 got=0
 for br in main master; do
-    if gh_curl -o "$f" "https://raw.githubusercontent.com/$SELF_REPO/$br/$SELF_FILE" 2>/dev/null && [ -s "$f" ]; then got=1; break; fi
+    for m in api raw; do
+        rm -f "$f"
+        if [ $m = api ]; then
+            gh_curl -H "Accept: application/vnd.github.raw" -o "$f" \
+                "https://api.github.com/repos/$SELF_REPO/contents/$SELF_FILE?ref=$br" 2>/dev/null
+        else
+            gh_curl -o "$f" "https://raw.githubusercontent.com/$SELF_REPO/$br/$SELF_FILE?nc=$(date +%s)" 2>/dev/null
+        fi
+        if [ -s "$f" ] && head -n1 "$f" | grep -q '^#!/bin/sh'; then got=1; log "Skript geladen ($m, Branch $br, $(wc -c < "$f") Bytes)"; break 2; fi
+    done
 done
-[ $got = 1 ] || fail "Skript konnte nicht von GitHub geladen werden ($SELF_REPO)"
+[ $got = 1 ] || fail "Skript konnte nicht von GitHub geladen werden ($SELF_REPO, Datei $SELF_FILE im Hauptverzeichnis)"
 
 head -n1 "$f" | grep -q '^#!/bin/sh' || fail "heruntergeladene Datei ist kein Shell-Skript"
 sh -n "$f" 2>/dev/null || fail "heruntergeladenes Skript hat Syntaxfehler"
@@ -551,17 +562,18 @@ grep -q 'NC_SELF_UPDATE' "$f" || fail "die Version auf GitHub kennt den Update-M
 oldv=$(sed -n 's/^NC_VERSION = "\(.*\)"/\1/p' "$BASE/bin/nc-core.py" | head -n1)
 newv=$(sed -n 's/^NC_VERSION = "\(.*\)"/\1/p' "$f" | head -n1)
 log "Version: ${oldv:-?} -> ${newv:-?}"
+[ "$oldv" = "$newv" ] && log "HINWEIS: GitHub liefert dieselbe Version (${newv:-?}). Wurde die neue Datei im Hauptverzeichnis hochgeladen und NC_VERSION erhoeht?"
 
 cp "$f" "$BASE/netzwerk-core-install.sh"
 if NC_SELF_UPDATE=1 NC_SKIP_NETWORK=1 /bin/sh "$f"; then
     rm -rf "$tmp"
-    log "Selbst-Update auf Version ${newv:-?} abgeschlossen. Die Statusseite startet neu ..."
+    say "Selbst-Update $(date '+%H:%M'): Version ${oldv:-?} -> ${newv:-?} abgeschlossen."
     # Statusseite erst ganz zum Schluss neu starten (dieses Skript wird von ihr gestartet)
     ( sleep 3; /etc/init.d/nc-core restart ) >/dev/null 2>&1 &
     exit 0
 fi
 
-log "FEHLER beim Ausfuehren des neuen Skripts - stelle die vorherige Version wieder her"
+say "FEHLER: das neue Skript (Version ${newv:-?}) ist fehlgeschlagen - vorherige Version ${oldv:-?} wiederhergestellt. Details: Protokoll."
 if [ -d "$BASE/backup-core/bin" ]; then
     cp -f "$BASE"/backup-core/bin/* "$BASE/bin/" 2>/dev/null
     [ -f "$BASE/backup-core/apps.conf" ] && cp -f "$BASE/backup-core/apps.conf" "$BASE/apps.conf"
@@ -581,7 +593,7 @@ cat > "$BASE/bin/nc-core.py" <<'NC_CORE_EOF'
 import json, os, re, shutil, socket, subprocess, threading, time, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-NC_VERSION = "1.6.0"
+NC_VERSION = "1.6.1"
 BASE = os.environ.get("NC_BASE", "/root/Netzwerk-Core")
 PORT = int(os.environ.get("NC_PORT", "8090"))
 OWNER = "Scorch1262"
@@ -764,9 +776,9 @@ def fetch_core_version():
     for br in ("main", "master"):
         try:
             req = urllib.request.Request(
-                "https://raw.githubusercontent.com/%s/%s/%s" % (SELF_REPO, br, SELF_FILE), headers=hdr)
+                "https://raw.githubusercontent.com/%s/%s/%s?nc=%d" % (SELF_REPO, br, SELF_FILE, int(time.time())), headers=hdr)
             with urllib.request.urlopen(req, timeout=15) as r:
-                head = r.read(60000).decode("utf-8", "replace")
+                head = r.read(300000).decode("utf-8", "replace")
             m = re.search(r'^NC_VERSION\s*=\s*"([^"]+)"', head, re.M)
             if m:
                 return m.group(1)
@@ -775,10 +787,20 @@ def fetch_core_version():
     return ""
 
 
+def selfupdate_last():
+    p = os.path.join(BASE, "selfupdate.last")
+    try:
+        if time.time() - os.path.getmtime(p) > 3600:
+            return ""
+    except OSError:
+        return ""
+    return read(p, 400)
+
+
 def core_status():
     rv = REMOTE_CORE["version"]
     newer = bool(rv) and vtuple(rv) > vtuple(NC_VERSION)
-    return dict(version=NC_VERSION, remote=rv, update=newer)
+    return dict(version=NC_VERSION, remote=rv, update=newer, last=selfupdate_last())
 
 
 def refresher():
@@ -848,6 +870,7 @@ body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.4 -apple-system,
 header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:18px 22px;border-bottom:1px solid var(--line)}
 h1{margin:0;font-size:22px}
 .sub{color:var(--mut);font-size:13px}
+.sub.bad{color:var(--bad)}
 main{padding:22px;max-width:1200px;margin:0 auto}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:14px}
 .tile{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:8px}
@@ -905,6 +928,7 @@ function render(d){
   last=d;
   const inf=$('#info');inf.textContent='Version '+d.version+' · '+location.hostname;
   if(d.core&&d.core.update){inf.append(' ');inf.append(el('span','badge','Skript-Update '+d.core.remote+' verfügbar'));}
+  if(d.core&&d.core.last){inf.append(el('div',d.core.last.indexOf('FEHLER')>=0?'sub bad':'sub',d.core.last));}
   busy=d.running;
   renderNet(d.net);
   const g=$('#grid');g.replaceChildren();
