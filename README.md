@@ -7,7 +7,7 @@ Ein-Klick-Einrichtung für einen **GL.iNet Brume 2 (GL-MT2500, OpenWrt)**: Das S
 ## Was wird installiert?
 
 - `nano`, `mosquitto` (MQTT-Broker, Port 1883)
-- 11 Anwendungen aus GitHub, jeweils mit Autostart (procd)
+- 15 Anwendungen aus GitHub, jeweils mit Autostart (procd)
 - die Statusseite **Netzwerk-Core** auf Port **8090**
 
 | Anwendung | Port |
@@ -20,7 +20,11 @@ Ein-Klick-Einrichtung für einen **GL.iNet Brume 2 (GL-MT2500, OpenWrt)**: Das S
 | Drucker-Dashboard (BambuLab MK6) | 8000 |
 | Wetter-Outfit | 8095 |
 | MQTT Kachel-Dashboard | 8085 |
-| Klingelbildschirm (MK3) | 8081 / 8082 / 8083 |
+| Klingelbildschirm (MK3) | 8081 / 8082 (Anzeigen), 8083 (Einrichtung, Button *Öffnen*) |
+| Rohrleitungsplan | 8087 |
+| KabelManager | 8088 |
+| Ablaufplan-Editor | 8089 |
+| OverWatch MK2 (ohne SMS-Modem) | 8094 |
 | Netzwerk-Chat | 8092 |
 | HomeKit2MQTT | 51888 (HomeKit 51826) |
 

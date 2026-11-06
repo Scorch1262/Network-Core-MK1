@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-#  Netzwerk-Core Installer v1.6.2 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
+#  Netzwerk-Core Installer v1.7.0 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
 #
 #  Einmal per SSH ausfuehren:   sh netzwerk-core-install.sh
 #
@@ -14,7 +14,7 @@
 #  fuehrt sie im Update-Modus (NC_SELF_UPDATE=1) aus: Hilfsskripte, Statusseite
 #  und App-Liste werden erneuert, Netzwerk und App-Daten bleiben unberuehrt.
 #
-#  Installiert: nano, mosquitto, 11 Anwendungen aus GitHub (Scorch1262),
+#  Installiert: nano, mosquitto, 15 Anwendungen aus GitHub (Scorch1262),
 #  je Anwendung einen Autostart (procd) und die Statusseite "Netzwerk-Core"
 #  (Port 8090) mit Kacheln und Update-Buttons.
 #  Schlaegt etwas wegen fehlendem Internet fehl, laeuft die Installation beim
@@ -49,6 +49,10 @@ dashboard|MQTT-Dashboard|MQTT-Dashboard-MK4|5001|app.py|||Graphen, Status-Anzeig
 makro|MQTT Makro-Zentrale|MQTT-Makro-Zentrale-MK1|8010|app.py|||MQTT-Makro-Ketten verwalten und ausfuehren
 diagram|MQTT-Diagram|MQTT-Diagram-MK1|5000|main.py||DASHBOARD_HOST=0.0.0.0 DASHBOARD_PORT=5000 DASHBOARD_OPEN_BROWSER=0|Live-Mindmap aller MQTT-Topics
 netzwerkplan|Netzwerkplaner|Netzwerkplaner-MK1|8086|app.py|||Netzwerkplanung und Dokumentation
+rohrleitung|Rohrleitungsplan|Rohrleitungsplan-MK1|8087|app.py|||Rohrleitungsplan zeichnen und verwalten
+kabelmanager|KabelManager|KabelManager-MK1|8088|app.py|||Kabel verwalten und dokumentieren
+ablaufplan|Ablaufplan-Editor|AblaufplanEditor-MK1|8089|app.py|||Ablaufplaene erstellen (mit PDF-Export)
+overwatch|OverWatch MK2|OverWatch-MK2|8094|main.py|||Lagekarte mit ADS-B, FLARM und Starlink|--no-sms
 bambu|Drucker-Dashboard|BambuLab-MQTT-Dashboard-MK6|8000|app.py|||Bambu Lab / Ultimaker / OctoPrint / Formlabs
 outfit|Wetter-Outfit|Wetter-Outfit-Dashboard-MK1|8095|app.py|||Outfit-Vorschlaege nach Wetter und Aktivitaet
 kachel|MQTT Kachel-Dashboard|MQTT-Kachel-Dashboard-MK1|8085|app.py|||MQTT-Topics als Kacheln mit Symbolen und Schwellwerten|
@@ -159,6 +163,43 @@ NC_WB_EOF
     touch "$BASE/pyshims/.webbrowser_stub"
 }
 
+# Port in einer config.yaml ("server:" -> "port:") setzen; gibt "changed" / "error" aus
+set_yaml_port() {   # datei port
+    [ -f "$1" ] || return 0
+    python3 - "$1" "$2" <<'NC_PYYAML_EOF'
+import re, sys
+f, p = sys.argv[1], int(sys.argv[2])
+raw = open(f, "rb").read().decode("utf-8-sig", "replace")
+lines = raw.split("\n")
+inside = False
+for i, l in enumerate(lines):
+    if re.match(r"^server:\s*(#.*)?$", l.rstrip("\r")):
+        inside = True
+        continue
+    if inside:
+        if l.strip() and not l[0].isspace() and not l.lstrip().startswith("#"):
+            break
+        m = re.match(r"^(\s+port:\s*)(\d+)(.*)$", l.rstrip("\r"))
+        if m:
+            if int(m.group(2)) == p:
+                sys.exit(0)
+            lines[i] = m.group(1) + str(p) + m.group(3) + ("\r" if l.endswith("\r") else "")
+            open(f, "w", encoding="utf-8").write("\n".join(lines))
+            print("changed")
+            sys.exit(0)
+print("error")
+NC_PYYAML_EOF
+}
+
+# Anwendungen, deren Web-Port in einer Konfigurationsdatei steht (nicht per Argument)
+PORT_CFG_IDS="netzwerkplan rohrleitung kabelmanager ablaufplan overwatch"
+set_app_port() {   # id workdir port
+    case "$1" in
+        netzwerkplan|rohrleitung|kabelmanager|ablaufplan) set_json_port "$2/config.json" "$3" ;;
+        overwatch) set_yaml_port "$2/config.yaml" "$3" ;;
+    esac
+}
+
 repo_path() { case "$1" in */*) echo "$1" ;; *) echo "$OWNER/$1" ;; esac; }
 
 remote_sha() {
@@ -184,7 +225,7 @@ fetch_repo() {   # repo tmpdir
 # Dateien, die beim Update NICHT ueberschrieben werden (Nutzerdaten)
 is_preserved() {
     case "$1" in
-        config.json|*/config.json|markers.json|*/markers.json) return 0 ;;
+        config.json|*/config.json|markers.json|*/markers.json|config.yaml|*/config.yaml|*.mbtiles) return 0 ;;
         *.db|*.sqlite|*.sqlite3) return 0 ;;
         data/*|*/data/*|daten/*|*/daten/*|uploads/*|*/uploads/*) return 0 ;;
         print_history/*|*/print_history/*) return 0 ;;
@@ -246,7 +287,21 @@ python_deps() {
               --target "$appdir/.pylibs" -r "$tmp/req.txt"; then
             echo "$sum" > "$appdir/.nc_req"
         else
-            log "FEHLER: pip-Installation fehlgeschlagen"; return 1
+            # Einzeln nachinstallieren, bei Fehlern ohne feste Version (neuere Versionen haben oft passende Wheels)
+            log "Gesamtinstallation fehlgeschlagen - installiere Pakete einzeln ..."
+            bad=0
+            while IFS= read -r pk; do
+                [ -n "$(echo "$pk" | tr -d ' \r')" ] || continue
+                python3 -m pip install --no-cache-dir --disable-pip-version-check --upgrade --target "$appdir/.pylibs" "$pk" >/dev/null 2>&1 && continue
+                pn=$(echo "$pk" | sed 's/[=<>~!;[ ].*//')
+                if python3 -m pip install --no-cache-dir --disable-pip-version-check --upgrade --target "$appdir/.pylibs" "$pn" >/dev/null 2>&1; then
+                    log "  $pn: ohne feste Version installiert"
+                else
+                    log "  WARNUNG: Paket $pn nicht installierbar"; bad=$((bad+1))
+                fi
+            done < "$tmp/req.txt"
+            if [ $bad -gt 0 ]; then log "FEHLER: $bad Paket(e) fehlen - die Anwendung startet evtl. nicht"; return 1; fi
+            echo "$sum" > "$appdir/.nc_req"
         fi
     fi
     interp=/usr/bin/python3
@@ -417,13 +472,11 @@ deploy_app() {   # id
         *)    python_deps ;;
     esac || { rm -rf "$tmp"; return 1; }
     [ "$id" = "homekit" ] && init_homekit
-    # Netzwerkplaner: Port steht in config.json (8080 kollidiert mit der Router-Oberflaeche)
-    if [ "$id" = "netzwerkplan" ]; then
-        case "$(set_json_port "$workdir/config.json" "$port")" in
-            changed) log "Port in config.json auf $port gesetzt" ;;
-            error)   log "WARNUNG: Port in $workdir/config.json nicht aenderbar - bitte \"port\": $port unter \"server\" selbst eintragen" ;;
-        esac
-    fi
+    # Anwendungen mit Port in der Konfigurationsdatei (8080 kollidiert mit der Router-Oberflaeche)
+    case "$(set_app_port "$id" "$workdir" "$port")" in
+        changed) log "Port in der Konfigurationsdatei auf $port gesetzt" ;;
+        error)   log "WARNUNG: Port in $workdir nicht aenderbar - bitte server.port = $port selbst eintragen" ;;
+    esac
 
     ensure_pyshims
     # Startskript + Autostart (procd)
@@ -601,7 +654,7 @@ cat > "$BASE/bin/nc-core.py" <<'NC_CORE_EOF'
 import json, os, re, shutil, socket, subprocess, threading, time, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-NC_VERSION = "1.6.2"
+NC_VERSION = "1.7.0"
 BASE = os.environ.get("NC_BASE", "/root/Netzwerk-Core")
 PORT = int(os.environ.get("NC_PORT", "8090"))
 OWNER = "Scorch1262"
@@ -682,6 +735,10 @@ def app_version(wd, appdir=""):
     return ""
 
 
+# Anwendungen, deren "Oeffnen"-Link auf eine andere Seite/Port zeigt (Klingel: Einrichtungsseite)
+OPEN_PORT = {"klingel": 8083}
+
+
 def app_status(a):
     d = os.path.join(APPS_DIR, a["id"])
     installed = os.path.exists(os.path.join(d, ".nc_ok"))
@@ -689,7 +746,7 @@ def app_status(a):
     local = read(os.path.join(d, ".nc_sha"), 60)
     remote = REMOTE.get(a["repo"], "")
     return dict(id=a["id"], name=a["name"], desc=a["desc"], port=a["port"],
-                web=True, manage=True, installed=installed,
+                open_port=OPEN_PORT.get(a["id"], a["port"]), web=True, manage=True, installed=installed,
                 up=port_up(a["port"]),
                 version=app_version(wd, d) if installed else "",
                 help=(a["id"] == "homekit"),
@@ -947,7 +1004,7 @@ function render(d){
     const r=el('div','row');
     if(a.web){
       const l=el('a','btn'+(a.up?'':' off'),'Öffnen');
-      l.href='http://'+location.hostname+':'+a.port+'/';l.target='_blank';r.append(l);
+      l.href='http://'+location.hostname+':'+(a.open_port||a.port)+'/';l.target='_blank';r.append(l);
     }
     const s=el('button','sec gear','⚙');s.title='Einstellungen';s.setAttribute('aria-label','Einstellungen '+a.name);
     if(a.update)s.append(el('span','pip'));
@@ -972,7 +1029,7 @@ function renderSettings(){
   const c=el('div','cred');
   const stat=a.up?'läuft':(a.installed?'gestoppt':'nicht installiert');
   c.append(el('span',null,'Status'),el('span',null,stat));
-  c.append(el('span',null,'Port'),el('span',null,String(a.port)));
+  c.append(el('span',null,'Port'),el('span',null,String(a.port)+(a.open_port&&a.open_port!==a.port?' (Einrichtung: '+a.open_port+')':'')));
   if(a.version)c.append(el('span',null,'Version'),el('span',null,'v'+a.version));
   if(a.update){const u=el('span');u.append(el('span','badge','Update verfügbar'));c.append(el('span',null,'Update'),u);}
   b.append(c);
@@ -1097,7 +1154,7 @@ BACKUP_DIR = os.path.join(BASE, "backup-data")
 TMP_DIR = os.path.join(BASE, "tmp")
 MAX_UPLOAD = 300 * 1024 * 1024
 DATA_DIRS = ("data", "daten", "uploads", "print_history")
-DATA_NAMES = ("config.json", "markers.json")
+DATA_NAMES = ("config.json", "markers.json", "config.yaml")
 SKIP_DIRS = {".pylibs", "node_modules", "__pycache__", ".git", "logs", "log", "cache", ".cache", "tmp"}
 SKIP_NAMES = {"package-lock.json"}
 # Dateien ausserhalb des Programmordners (eigene Installation der Anwendung)
@@ -1109,7 +1166,7 @@ def preserved(rel):
     parts = rel.split("/")
     if parts[-1] in DATA_NAMES:
         return True
-    if rel.endswith((".db", ".sqlite", ".sqlite3")):
+    if rel.endswith((".db", ".sqlite", ".sqlite3", ".mbtiles")):
         return True
     return any(p in DATA_DIRS for p in parts[:-1])
 
@@ -1855,14 +1912,15 @@ if [ "$SELF_UPDATE" = "1" ]; then
             netstat -lnt 2>/dev/null | grep -q ":$(app_field "$rid" 4) " || { log "Starte $rid neu (Python-Ersatzmodule)"; /etc/init.d/nc-$rid restart >/dev/null 2>&1; }
         fi
     done
-    # Netzwerkplaner: neuer Port (8080 kollidiert mit der Router-Oberflaeche)
-    if [ -f "$BASE/apps/netzwerkplan/.nc_ok" ]; then
-        wd=$(cat "$BASE/apps/netzwerkplan/.nc_workdir" 2>/dev/null); [ -n "$wd" ] || wd="$BASE/apps/netzwerkplan"
-        if [ "$(set_json_port "$wd/config.json" "$(app_field netzwerkplan 4)")" = "changed" ]; then
-            log "Netzwerkplaner: Port auf $(app_field netzwerkplan 4) umgestellt"
-            /etc/init.d/nc-netzwerkplan restart >/dev/null 2>&1
+    # Anwendungen mit Port in der Konfigurationsdatei: Port setzen (8080 kollidiert mit der Router-Oberflaeche)
+    for pid_ in $PORT_CFG_IDS; do
+        [ -f "$BASE/apps/$pid_/.nc_ok" ] || continue
+        wd=$(cat "$BASE/apps/$pid_/.nc_workdir" 2>/dev/null); [ -n "$wd" ] || wd="$BASE/apps/$pid_"
+        if [ "$(set_app_port "$pid_" "$wd" "$(app_field "$pid_" 4)")" = "changed" ]; then
+            log "$pid_: Port auf $(app_field "$pid_" 4) umgestellt"
+            /etc/init.d/nc-$pid_ restart >/dev/null 2>&1
         fi
-    fi
+    done
     /etc/init.d/nc-core enable 2>/dev/null
     sync
     exit 0
