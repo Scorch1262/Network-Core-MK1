@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-#  Netzwerk-Core Installer v1.6.1 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
+#  Netzwerk-Core Installer v1.6.2 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
 #
 #  Einmal per SSH ausfuehren:   sh netzwerk-core-install.sh
 #
@@ -24,6 +24,11 @@ BASE=/root/Netzwerk-Core
 
 [ "$(id -u)" = "0" ] || { echo "Bitte als root ausfuehren."; exit 1; }
 mkdir -p "$BASE/bin" "$BASE/apps" "$BASE/run"
+
+# Kopie dieses Skripts behalten (Selbstheilung der Statusseite nach Stromausfall/Neustart)
+if [ -f "$0" ] && [ "$0" != "$BASE/netzwerk-core-install.sh" ] && grep -q 'NC_SELF_UPDATE' "$0" 2>/dev/null; then
+    cp -f "$0" "$BASE/netzwerk-core-install.sh" 2>/dev/null
+fi
 
 # Update-Modus (Selbst-Update): vorher Sicherung der Hilfsskripte fuer den Rollback
 SELF_UPDATE=${NC_SELF_UPDATE:-0}
@@ -478,6 +483,7 @@ else
     unmark_removed "$target"
     deploy_app "$target"
 fi
+sync
 log "Update beendet."
 NC_UPDATE_EOF
 
@@ -515,6 +521,7 @@ else
     log "Einstellungen/Daten bleiben erhalten (bei erneuter Installation wieder da)."
 fi
 mark_removed "$id"
+sync
 log "$name wurde deinstalliert. Mit \"Installieren\" auf der Kachel jederzeit wieder einrichten."
 NC_UNINSTALL_EOF
 
@@ -567,6 +574,7 @@ log "Version: ${oldv:-?} -> ${newv:-?}"
 cp "$f" "$BASE/netzwerk-core-install.sh"
 if NC_SELF_UPDATE=1 NC_SKIP_NETWORK=1 /bin/sh "$f"; then
     rm -rf "$tmp"
+    sync
     say "Selbst-Update $(date '+%H:%M'): Version ${oldv:-?} -> ${newv:-?} abgeschlossen."
     # Statusseite erst ganz zum Schluss neu starten (dieses Skript wird von ihr gestartet)
     ( sleep 3; /etc/init.d/nc-core restart ) >/dev/null 2>&1 &
@@ -593,7 +601,7 @@ cat > "$BASE/bin/nc-core.py" <<'NC_CORE_EOF'
 import json, os, re, shutil, socket, subprocess, threading, time, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-NC_VERSION = "1.6.1"
+NC_VERSION = "1.6.2"
 BASE = os.environ.get("NC_BASE", "/root/Netzwerk-Core")
 PORT = int(os.environ.get("NC_PORT", "8090"))
 OWNER = "Scorch1262"
@@ -1280,6 +1288,7 @@ def restore_zip(app_id, tmp_path):
         except Exception as e:
             svc_ctl(app_id, "start")
             return 500, dict(error="Fehler beim Entpacken: %s" % e)
+    os.sync()
     svc_ctl(app_id, "start")
     return 200, dict(msg="%d Datei(en) wiederhergestellt, Dienst neu gestartet." % len(targets))
 
@@ -1315,6 +1324,7 @@ def restore_file(app_id, tmp_path, name):
     except Exception as e:
         svc_ctl(app_id, "start")
         return 500, dict(error="Fehler beim Schreiben: %s" % e)
+    os.sync()
     svc_ctl(app_id, "start")
     return 200, dict(msg="%s ersetzt, Dienst neu gestartet." % name)
 
@@ -1773,6 +1783,7 @@ MQ_EOF
     /etc/init.d/nc-core restart
 
     touch "$BASE/.installed"
+    sync
     /etc/init.d/nc-firstrun disable 2>/dev/null
     ip=$(uci -q get network.lan.ipaddr); [ -n "$ip" ] || ip=192.168.8.1
     log "FERTIG. Statusseite: http://$ip:8090/"
@@ -1800,6 +1811,13 @@ START=96
 STOP=10
 USE_PROCD=1
 start_service() {
+    # Selbstheilung: ist nc-core.py nach einem unsauberen Neustart abgeschnitten/leer,
+    # wird es aus der gemerkten Skriptkopie neu erzeugt (einmal pro Systemstart)
+    if ! grep -q '^if __name__' $BASE/bin/nc-core.py 2>/dev/null && [ -f $BASE/netzwerk-core-install.sh ] && [ ! -f /tmp/nc-heal-tried ]; then
+        touch /tmp/nc-heal-tried
+        ( sleep 5; NC_HEAL=1 NC_SELF_UPDATE=1 NC_SKIP_NETWORK=1 /bin/sh $BASE/netzwerk-core-install.sh >> $BASE/heal.log 2>&1; /etc/init.d/nc-core restart ) >/dev/null 2>&1 &
+        return 0
+    fi
     procd_open_instance
     procd_set_param command /usr/bin/python3 $BASE/bin/nc-core.py
     procd_set_param env NC_PORT=8090 NC_BASE=$BASE
@@ -1810,6 +1828,7 @@ start_service() {
 }
 CORE_EOF
 chmod +x /etc/init.d/nc-core
+sync
 
 
 # ---------------------------------------------------------------------------
@@ -1819,7 +1838,7 @@ chmod +x /etc/init.d/nc-core
 if [ "$SELF_UPDATE" = "1" ]; then
     . "$BASE/bin/nc-lib.sh"
     log "Update-Modus: Hilfsskripte und Statusseite erneuert"
-    for id in $(active_ids); do
+    for id in $([ "$NC_HEAL" = "1" ] || active_ids); do
         if [ ! -f "$BASE/apps/$id/.nc_ok" ]; then
             log "Neue Anwendung: $id"
             deploy_app "$id" || log "Anwendung $id uebersprungen (siehe oben)"
@@ -1845,6 +1864,7 @@ if [ "$SELF_UPDATE" = "1" ]; then
         fi
     fi
     /etc/init.d/nc-core enable 2>/dev/null
+    sync
     exit 0
 fi
 
