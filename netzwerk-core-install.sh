@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-#  Netzwerk-Core Installer v1.7.2 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
+#  Netzwerk-Core Installer v1.7.3 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
 #
 #  Einmal per SSH ausfuehren:   sh netzwerk-core-install.sh
 #
@@ -736,10 +736,10 @@ NC_SELFUPDATE_EOF
 cat > "$BASE/bin/nc-core.py" <<'NC_CORE_EOF'
 #!/usr/bin/env python3
 """Netzwerk-Core - Statusseite mit Kacheln und Update-Button."""
-import json, os, re, shutil, socket, subprocess, threading, time, urllib.parse, urllib.request
+import json, os, re, shutil, socket, subprocess, threading, time, urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-NC_VERSION = "1.7.2"
+NC_VERSION = "1.7.3"
 BASE = os.environ.get("NC_BASE", "/root/Netzwerk-Core")
 PORT = int(os.environ.get("NC_PORT", "8090"))
 OWNER = "Scorch1262"
@@ -896,19 +896,33 @@ def net_status():
                 dhcp_server=sh(["uci", "-q", "get", "dhcp.lan.ignore"]) != "1")
 
 
+ETAGS = {}
+
+
 def fetch_sha(repo):
+    """Neuester Commit-SHA. Mit ETag: unveraenderte Antworten (304) zaehlen nicht gegen das GitHub-Limit."""
     hdr = {"Accept": "application/vnd.github.sha", "User-Agent": "netzwerk-core"}
     tok = read(os.path.join(BASE, "github_token"), 200)
     if tok:
         hdr["Authorization"] = "token " + tok
     for br in ("main", "master"):
+        key = repo + "@" + br
+        h = dict(hdr)
+        if key in ETAGS:
+            h["If-None-Match"] = ETAGS[key][0]
         try:
             req = urllib.request.Request(
-                "https://api.github.com/repos/%s/commits/%s" % (repo if "/" in repo else OWNER + "/" + repo, br), headers=hdr)
+                "https://api.github.com/repos/%s/commits/%s" % (repo if "/" in repo else OWNER + "/" + repo, br), headers=h)
             with urllib.request.urlopen(req, timeout=10) as r:
                 s = r.read().decode().strip()
+                et = r.headers.get("ETag")
             if re.fullmatch(r"[0-9a-f]{40}", s):
+                if et:
+                    ETAGS[key] = (et, s)
                 return s
+        except urllib.error.HTTPError as e:
+            if e.code == 304 and key in ETAGS:
+                return ETAGS[key][1]
         except Exception:
             continue
     return ""
@@ -953,16 +967,45 @@ def core_status():
     return dict(version=NC_VERSION, remote=rv, update=newer, last=selfupdate_last())
 
 
-def refresher():
-    while True:
+_refresh_busy = False
+_refresh_last = [0.0, False]   # Zeitpunkt des letzten Laufs, ob alles abgerufen werden konnte
+
+
+def refresh_once():
+    global _refresh_busy
+    if _refresh_busy:
+        return
+    _refresh_busy = True
+    ok = True
+    try:
         v = fetch_core_version()
         if v:
             REMOTE_CORE["version"] = v
+        else:
+            ok = False
         for a in load_apps():
             s = fetch_sha(a["repo"])
             if s:
                 REMOTE[a["repo"]] = s
-        time.sleep(1800)
+            else:
+                ok = False
+    finally:
+        _refresh_last[0] = time.time()
+        _refresh_last[1] = ok
+        _refresh_busy = False
+
+
+def refresh_soon():
+    """Beim Aufruf der Seite im Hintergrund pruefen, wenn der letzte Abruf aelter als 60 s ist."""
+    if not _refresh_busy and time.time() - _refresh_last[0] > 60:
+        threading.Thread(target=refresh_once, daemon=True).start()
+
+
+def refresher():
+    while True:
+        refresh_once()
+        # bei Fehlern (z. B. Netz noch nicht da) bald erneut, sonst alle 5 Minuten
+        time.sleep(300 if _refresh_last[1] else 30)
 
 
 _restoring = False
@@ -1552,6 +1595,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/":
             self._send(200, INDEX, "text/html")
         elif path == "/api/status":
+            refresh_soon()
             self._send(200, json.dumps(dict(version=NC_VERSION, running=running(),
                                             net=net_status(), core=core_status(),
                                             apps=all_status())))
