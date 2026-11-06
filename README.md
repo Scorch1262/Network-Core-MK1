@@ -64,7 +64,7 @@ Manuell im Update-Modus: `NC_SELF_UPDATE=1 sh netzwerk-core-install.sh`
 
 ## Einstellungsfenster je Dienst
 
-Jede kompakte Kachel zeigt nur Name, Status und den Button *Öffnen*. Alles Weitere steckt im Einstellungsfenster (Zahnrad ⚙, ein orangefarbener Punkt zeigt ein verfügbares Update an): Status, Port, Version, *Update/Installieren*, *Deinstallieren*, *Hilfe* (nur HomeKit2MQTT) sowie Sichern und Einspielen der Einstellungen und Daten.
+Die Kacheln sind in Gruppen geordnet (IoT / SmartHome, Planungs Tools, Werkstatt, Sonstiges). Jede kompakte Kachel zeigt nur Name, Version, Status und den Button *Öffnen*. Alles Weitere steckt im Einstellungsfenster (Zahnrad ⚙, ein orangefarbener Punkt zeigt ein verfügbares Update an): Status, Port, Version, *Update/Installieren*, *Deinstallieren*, *Hilfe* (nur HomeKit2MQTT) sowie Sichern und Einspielen der Einstellungen und Daten.
 
 ![Einstellungsfenster](docs/einstellungen.png)
 

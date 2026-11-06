@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-#  Netzwerk-Core Installer v1.7.0 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
+#  Netzwerk-Core Installer v1.7.1 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
 #
 #  Einmal per SSH ausfuehren:   sh netzwerk-core-install.sh
 #
@@ -654,7 +654,7 @@ cat > "$BASE/bin/nc-core.py" <<'NC_CORE_EOF'
 import json, os, re, shutil, socket, subprocess, threading, time, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-NC_VERSION = "1.7.0"
+NC_VERSION = "1.7.1"
 BASE = os.environ.get("NC_BASE", "/root/Netzwerk-Core")
 PORT = int(os.environ.get("NC_PORT", "8090"))
 OWNER = "Scorch1262"
@@ -936,6 +936,8 @@ header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:s
 h1{margin:0;font-size:22px}
 .sub{color:var(--mut);font-size:13px}
 .sub.bad{color:var(--bad)}
+.grp{margin:26px 0 10px;font-size:13px;font-weight:600;color:var(--mut);text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--line);padding-bottom:6px}
+.ver{margin-left:auto;font-size:12px;color:var(--mut);white-space:nowrap}
 main{padding:22px;max-width:1200px;margin:0 auto}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:14px}
 .tile{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:8px}
@@ -978,7 +980,7 @@ ul.tips{margin:0;padding-left:20px;color:var(--mut);font-size:14px}ul.tips li{ma
 <main>
  <div id="err"></div>
  <div class="tile" id="net" style="margin-bottom:14px" hidden></div>
- <div class="grid" id="grid"></div>
+ <div id="grid"></div>
  <pre id="log" hidden></pre>
 </main>
 <div id="modal" hidden><div class="box" id="mbox"></div></div>
@@ -987,6 +989,11 @@ const $=s=>document.querySelector(s);
 let busy=false;
 function el(t,c,x){const e=document.createElement(t);if(c)e.className=c;if(x!==undefined)e.textContent=x;return e;}
 let last=null,openId=null,helpOpen=false,openSig='';
+const GROUPS=[
+  ['IoT / SmartHome',['mosquitto','flow','dashboard','makro','diagram','kachel','klingel','homekit']],
+  ['Planungs Tools',['netzwerkplan','rohrleitung','kabelmanager','ablaufplan']],
+  ['Werkstatt',['bambu']],
+  ['Sonstiges',['overwatch','outfit','chat']]];
 function closeModal(){openId=null;helpOpen=false;openSig='';$('#modal').hidden=true;}
 function fmtSize(n){return n>=1048576?(n/1048576).toFixed(1)+' MB':n>=1024?Math.round(n/1024)+' KB':n+' B';}
 function render(d){
@@ -996,10 +1003,11 @@ function render(d){
   if(d.core&&d.core.last){inf.append(el('div',d.core.last.indexOf('FEHLER')>=0?'sub bad':'sub',d.core.last));}
   busy=d.running;
   renderNet(d.net);
-  const g=$('#grid');g.replaceChildren();
-  d.apps.forEach(a=>{
+  const root=$('#grid');root.replaceChildren();
+  const mk=a=>{
     const t=el('div','tile'),h=el('div','head');
     h.append(el('span','dot '+(a.up?'up':'down')),el('h3',null,a.name));
+    if(a.version)h.append(el('span','ver','v'+a.version));
     t.append(h);
     const r=el('div','row');
     if(a.web){
@@ -1010,7 +1018,14 @@ function render(d){
     if(a.update)s.append(el('span','pip'));
     s.onclick=()=>openSettings(a.id);r.append(s);
     t.append(r);
-    g.append(t);
+    return t;
+  };
+  GROUPS.forEach(([title,ids],i)=>{
+    const items=ids.map(id=>d.apps.find(x=>x.id===id)).filter(Boolean);
+    if(i===GROUPS.length-1)d.apps.forEach(a=>{if(!GROUPS.some(g=>g[1].includes(a.id)))items.push(a);});
+    if(!items.length)return;
+    root.append(el('h2','grp',title));
+    const g=el('div','grid');items.forEach(a=>g.append(mk(a)));root.append(g);
   });
   $('#all').disabled=busy;$('#self').disabled=busy;
   if(openId&&!helpOpen){
