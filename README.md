@@ -51,17 +51,29 @@ Am Ende stellt das Skript den Router auf **Netzwerkteilnehmer ohne Routing** um:
 
 ## Updates
 
-- **Anwendungen:** Button *Update* je Kachel bzw. *Alle aktualisieren*. Die Apps werden aus ihren GitHub-Repos neu geladen, Einstellungen und Daten bleiben erhalten. Das Badge *Update verfügbar* erscheint, sobald ein neuer Stand im Repo liegt.
+- **Anwendungen:** Button *Update* im Einstellungsfenster der Kachel (⚙) bzw. *Alle aktualisieren* oben. Die Apps werden aus ihren GitHub-Repos neu geladen, Einstellungen und Daten bleiben erhalten. Das Badge *Update verfügbar* erscheint, sobald ein neuer Stand im Repo liegt.
 - **Dieses Skript:** Button *Skript aktualisieren* lädt die neueste `netzwerk-core-install.sh` aus diesem Repo und führt sie im Update-Modus aus. Erneuert werden Hilfsskripte, Statusseite und App-Liste (eigene Einträge in `apps.conf` bleiben erhalten); neue Apps werden nachinstalliert. Netzwerk, Mosquitto und App-Daten bleiben unberührt. Bei einem Fehler erfolgt ein automatischer Rollback (Sicherung unter `/root/Netzwerk-Core/backup-core/`). Das Badge *Skript-Update … verfügbar* erscheint, wenn die Versionsnummer `NC_VERSION` auf GitHub höher ist.
 
 > Die Versionen vor 1.4.0 kennen den Update-Modus noch nicht: Einmalig die neue Version manuell ausführen, danach geht es per Button.
 
 Manuell im Update-Modus: `NC_SELF_UPDATE=1 sh netzwerk-core-install.sh`
 
-## Dienste deinstallieren und Hilfe
+## Einstellungsfenster je Dienst
 
-- **Deinstallieren:** Jede Kachel hat einen Button *Deinstallieren*. Autostart und Dienst werden entfernt; auf Wunsch werden auch Einstellungen und Daten gelöscht (sonst bleiben sie für eine spätere Neuinstallation erhalten). Deinstallierte Dienste werden von *Alle aktualisieren* und beim Skript-Update nicht wieder installiert; mit *Installieren* auf der Kachel kommen sie zurück.
-- **HomeKit2MQTT-Hilfe:** Die Kachel hat einen Button *Hilfe* mit der Einrichtung Schritt für Schritt und den aktuellen Zugangsdaten (HomeKit-Code, Bridge-ID, Web-Login, Ports).
+Jede kompakte Kachel zeigt nur Name, Status und den Button *Öffnen*. Alles Weitere steckt im Einstellungsfenster (Zahnrad ⚙, ein orangefarbener Punkt zeigt ein verfügbares Update an): Status, Port, Version, *Update/Installieren*, *Deinstallieren*, *Hilfe* (nur HomeKit2MQTT) sowie Sichern und Einspielen der Einstellungen und Daten.
+
+![Einstellungsfenster](docs/einstellungen.png)
+
+### Einstellungen und Daten sichern / einspielen
+
+- **Sichern (ZIP):** lädt alle Einstellungs- und Datendateien des Dienstes als ZIP herunter, z. B. `config.json`, Datenbanken, Ordner `data/` und hochgeladene Bilder (beim Wetter-Outfit die Kleidungs-Datenbank samt Bildern, bei HomeKit2MQTT auch die Kopplungsdaten, beim Klingelbildschirm die `config.ini`). Das ZIP kann Zugangsdaten (z. B. MQTT-Passwörter) enthalten und sollte entsprechend aufbewahrt werden.
+- **Hochladen:** spielt ein solches ZIP oder eine einzelne Einstellungsdatei (z. B. `config.json`) ein. Vorher legt der Netzwerk-Core automatisch eine Sicherung unter `/root/Netzwerk-Core/backup-data/` an (die letzten 3 je Dienst), danach startet der Dienst neu. Ein ZIP eines anderen Dienstes wird abgelehnt, Programmdateien werden nie überschrieben.
+- Hinweis: Welche Dateien als Daten gelten, merkt sich der Netzwerk-Core beim Installieren/Aktualisieren eines Dienstes. Bei bereits installierten Diensten ist die Erkennung nach dem nächsten *Update* am genauesten; Standard-Dateien (`config.json`, `*.db`, `data/`, `uploads/` …) werden immer erkannt.
+
+### Deinstallieren und Hilfe
+
+- **Deinstallieren:** Im Einstellungsfenster. Autostart und Dienst werden entfernt; auf Wunsch werden auch Einstellungen und Daten gelöscht (sonst bleiben sie für eine spätere Neuinstallation erhalten). Deinstallierte Dienste werden von *Alle aktualisieren* und beim Skript-Update nicht wieder installiert; mit *Installieren* auf der Kachel kommen sie zurück.
+- **HomeKit2MQTT-Hilfe:** Im Einstellungsfenster gibt es einen Button *Hilfe* mit der Einrichtung Schritt für Schritt und den aktuellen Zugangsdaten (HomeKit-Code, Bridge-ID, Web-Login, Ports).
 
 ![HomeKit2MQTT-Hilfe](docs/homekit-hilfe.png)
 

@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-#  Netzwerk-Core Installer v1.5.4 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
+#  Netzwerk-Core Installer v1.6.0 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
 #
 #  Einmal per SSH ausfuehren:   sh netzwerk-core-install.sh
 #
@@ -385,6 +385,8 @@ deploy_app() {   # id
         mkdir -p "$(dirname "$dest")"
         cp -f "$src/$f" "$dest"
     done
+    # Dateiliste des Repos merken: alles andere im Ordner sind Einstellungen/Daten (Sicherung per ZIP)
+    (cd "$src" && find . -type f) | sed 's#^\./##' | while read -r f; do is_skipped "$f" || echo "$f"; done > "$appdir/.nc_files"
 
     workdir="$appdir"; [ -n "$subdir" ] && workdir="$appdir/$subdir"
     workdir=$(pick_workdir "$workdir")
@@ -576,10 +578,10 @@ NC_SELFUPDATE_EOF
 cat > "$BASE/bin/nc-core.py" <<'NC_CORE_EOF'
 #!/usr/bin/env python3
 """Netzwerk-Core - Statusseite mit Kacheln und Update-Button."""
-import json, os, re, socket, subprocess, threading, time, urllib.parse, urllib.request
+import json, os, re, shutil, socket, subprocess, threading, time, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-NC_VERSION = "1.5.4"
+NC_VERSION = "1.6.0"
 BASE = os.environ.get("NC_BASE", "/root/Netzwerk-Core")
 PORT = int(os.environ.get("NC_PORT", "8090"))
 OWNER = "Scorch1262"
@@ -791,8 +793,11 @@ def refresher():
         time.sleep(1800)
 
 
+_restoring = False
+
+
 def running():
-    return _proc is not None and _proc.poll() is None
+    return _restoring or (_proc is not None and _proc.poll() is None)
 
 
 def start_uninstall(target, mode):
@@ -862,6 +867,9 @@ a.off{background:#2f3a4a;pointer-events:none;opacity:.5}
 pre{background:#0a0d11;border:1px solid var(--line);border-radius:10px;padding:12px;max-height:320px;overflow:auto;font-size:12px;white-space:pre-wrap;margin-top:18px}
 #err{color:var(--bad)}
 button.del{background:#3a2326;color:#fca5a5}
+.gear{position:relative;flex:none;font-size:18px;line-height:1;padding:7px 12px}
+.pip{position:absolute;top:4px;right:4px;width:9px;height:9px;border-radius:50%;background:var(--warn)}
+a.btn.off{opacity:.45;pointer-events:none}
 .row2{display:flex;gap:8px}.row2 button{flex:1;font-size:13px;padding:6px 10px}
 #modal{position:fixed;inset:0;background:rgba(0,0,0,.65);display:flex;align-items:flex-start;justify-content:center;padding:24px 12px;overflow:auto;z-index:9}
 #modal[hidden]{display:none}
@@ -890,41 +898,95 @@ ul.tips{margin:0;padding-left:20px;color:var(--mut);font-size:14px}ul.tips li{ma
 const $=s=>document.querySelector(s);
 let busy=false;
 function el(t,c,x){const e=document.createElement(t);if(c)e.className=c;if(x!==undefined)e.textContent=x;return e;}
+let last=null,openId=null,helpOpen=false,openSig='';
+function closeModal(){openId=null;helpOpen=false;openSig='';$('#modal').hidden=true;}
+function fmtSize(n){return n>=1048576?(n/1048576).toFixed(1)+' MB':n>=1024?Math.round(n/1024)+' KB':n+' B';}
 function render(d){
-  const inf=$('#info');inf.textContent='Version '+d.version+' \u00b7 '+location.hostname;
-  if(d.core&&d.core.update){inf.append(' ');inf.append(el('span','badge','Skript-Update '+d.core.remote+' verf\u00fcgbar'));}
+  last=d;
+  const inf=$('#info');inf.textContent='Version '+d.version+' · '+location.hostname;
+  if(d.core&&d.core.update){inf.append(' ');inf.append(el('span','badge','Skript-Update '+d.core.remote+' verfügbar'));}
   busy=d.running;
   renderNet(d.net);
   const g=$('#grid');g.replaceChildren();
   d.apps.forEach(a=>{
     const t=el('div','tile'),h=el('div','head');
     h.append(el('span','dot '+(a.up?'up':'down')),el('h3',null,a.name));
-    t.append(h,el('p','desc',a.desc));
-    const m=el('div','meta');
-    let txt='Port '+a.port+' \u00b7 '+(a.up?'l\u00e4uft':(a.installed?'gestoppt':'nicht installiert'));
-    if(a.version)txt+=' \u00b7 v'+a.version;
-    m.append(txt);
-    if(a.update){m.append(' ');m.append(el('span','badge','Update verf\u00fcgbar'));}
-    t.append(m);
+    t.append(h);
     const r=el('div','row');
     if(a.web){
-      const l=el('a','btn'+(a.up?'':' off'),'\u00d6ffnen');
+      const l=el('a','btn'+(a.up?'':' off'),'Öffnen');
       l.href='http://'+location.hostname+':'+a.port+'/';l.target='_blank';r.append(l);
     }
-    if(a.manage){
-      const b=el('button','sec',a.installed?'Update':'Installieren');
-      b.disabled=busy;b.onclick=()=>upd(a.id);r.append(b);
-    }
+    const s=el('button','sec gear','⚙');s.title='Einstellungen';s.setAttribute('aria-label','Einstellungen '+a.name);
+    if(a.update)s.append(el('span','pip'));
+    s.onclick=()=>openSettings(a.id);r.append(s);
     t.append(r);
-    if(a.installed&&(a.help||a.manage)){
-      const r2=el('div','row2');
-      if(a.help){const h=el('button','sec','\u2753 Hilfe');h.onclick=()=>help(a.id);r2.append(h);}
-      if(a.manage){const x=el('button','del','Deinstallieren');x.disabled=busy;x.onclick=()=>uninst(a);r2.append(x);}
-      t.append(r2);
-    }
     g.append(t);
   });
   $('#all').disabled=busy;$('#self').disabled=busy;
+  if(openId&&!helpOpen){
+    const a=d.apps.find(x=>x.id===openId),sig=JSON.stringify([a,busy]);
+    if(sig!==openSig)renderSettings();
+  }
+}
+function openSettings(id){openId=id;helpOpen=false;renderSettings();$('#modal').hidden=false;}
+function renderSettings(){
+  const a=last.apps.find(x=>x.id===openId);
+  if(!a){closeModal();return;}
+  openSig=JSON.stringify([a,busy]);
+  const b=$('#mbox');b.replaceChildren();
+  const h=el('h2');h.append(el('span','dot '+(a.up?'up':'down')),' '+a.name);b.append(h);
+  b.append(el('p','desc',a.desc));
+  const c=el('div','cred');
+  const stat=a.up?'läuft':(a.installed?'gestoppt':'nicht installiert');
+  c.append(el('span',null,'Status'),el('span',null,stat));
+  c.append(el('span',null,'Port'),el('span',null,String(a.port)));
+  if(a.version)c.append(el('span',null,'Version'),el('span',null,'v'+a.version));
+  if(a.update){const u=el('span');u.append(el('span','badge','Update verfügbar'));c.append(el('span',null,'Update'),u);}
+  b.append(c);
+  if(busy)b.append(el('p','desc','Es läuft gerade eine Aktion - Ablauf im Protokoll unten auf der Seite.'));
+  if(a.manage){
+    b.append(el('h4',null,'Dienst'));
+    const r=el('div','row2');
+    const u=el('button',a.update||!a.installed?'':'sec',a.installed?'Update':'Installieren');
+    u.disabled=busy;u.onclick=()=>{upd(a.id);closeModal();};r.append(u);
+    if(a.installed&&a.help){const x=el('button','sec','❓ Hilfe');x.onclick=()=>help(a.id);r.append(x);}
+    if(a.installed){const x=el('button','del','Deinstallieren');x.disabled=busy;x.onclick=()=>{closeModal();uninst(a);};r.append(x);}
+    b.append(r);
+  }
+  if(a.manage&&a.installed){
+    b.append(el('h4',null,'Einstellungen & Daten'));
+    const info=el('p','desc','Wird geladen ...');b.append(info);
+    const r=el('div','row2');
+    const dl=el('a','btn','⬇ Sichern (ZIP)');dl.href='/api/backup?id='+encodeURIComponent(a.id);dl.setAttribute('download','');
+    const up=el('button','sec','⬆ Hochladen');up.disabled=busy;
+    const inp=el('input');inp.type='file';inp.accept='.zip,.json,.ini';inp.hidden=true;
+    up.onclick=()=>inp.click();
+    const msg=el('p','desc');
+    inp.onchange=()=>{if(inp.files[0])doUpload(a,inp.files[0],msg,up);inp.value='';};
+    r.append(dl,up,inp);b.append(r,msg);
+    b.append(el('p','desc','Hochladen: ZIP einer Sicherung oder eine einzelne Einstellungsdatei (z. B. config.json). Vorher wird automatisch eine Sicherung unter /root/Netzwerk-Core/backup-data/ angelegt, der Dienst startet danach neu.'));
+    fetch('/api/files?id='+encodeURIComponent(a.id)).then(x=>x.json()).then(f=>{
+      info.textContent=f.total?(f.total+' Datei(en), '+fmtSize(f.size)):'Keine Einstellungs-/Datendateien vorhanden.';
+      if(f.total){
+        const ul=el('ul','tips');f.files.slice(0,12).forEach(x=>ul.append(el('li',null,x.path+'  ('+fmtSize(x.size)+')')));
+        if(f.total>12)ul.append(el('li',null,'… und '+(f.total-12)+' weitere'));
+        info.after(ul);
+      }else dl.classList.add('off');
+    }).catch(()=>{info.textContent='';});
+  }
+  const x=el('button','sec','Schließen');x.style.marginTop='18px';x.onclick=closeModal;b.append(x);
+}
+async function doUpload(a,file,msg,btn){
+  const zip=/\.zip$/i.test(file.name);
+  if(!confirm((zip?'Sicherung ':'Datei ')+file.name+' für '+a.name+' einspielen? Vorhandene Einstellungen/Daten werden ersetzt (automatische Sicherung vorher), der Dienst startet neu.'))return;
+  btn.disabled=true;msg.textContent='Wird hochgeladen und eingespielt ...';
+  try{
+    const r=await fetch('/api/restore?id='+encodeURIComponent(a.id)+'&name='+encodeURIComponent(file.name),{method:'POST',body:file});
+    const j=await r.json().catch(()=>({}));
+    msg.textContent=r.ok?('✓ '+(j.msg||'fertig')):('Fehler: '+(j.error||('HTTP '+r.status)));
+  }catch(e){msg.textContent='Fehler: Verbindung unterbrochen';}
+  btn.disabled=false;
 }
 function renderNet(n){
   const box=$('#net');
@@ -976,10 +1038,11 @@ async function help(id){
     b.append(el('h4',null,'Probleme?'));
     const ul=el('ul','tips');d.tips.forEach(t=>ul.append(el('li',null,t)));b.append(ul);
   }
-  const x=el('button','sec','Schlie\u00dfen');x.style.marginTop='16px';x.onclick=()=>{$('#modal').hidden=true;};
-  b.append(x);$('#modal').hidden=false;
+  const x=el('button','sec',openId?'Zur\u00fcck':'Schlie\u00dfen');x.style.marginTop='16px';
+  x.onclick=()=>{if(openId){helpOpen=false;openSig='';renderSettings();}else closeModal();};
+  b.append(x);helpOpen=true;$('#modal').hidden=false;
 }
-$('#modal').onclick=e=>{if(e.target.id==='modal')$('#modal').hidden=true;};
+$('#modal').onclick=e=>{if(e.target.id==='modal')closeModal();};
 async function upd(id){
   await fetch('/api/update?id='+encodeURIComponent(id),{method:'POST'});
   $('#log').hidden=false;load();
@@ -995,6 +1058,259 @@ load();setInterval(load,4000);
 """
 
 
+# ---------------------------------------------------------------------------
+# Einstellungen/Daten sichern (ZIP-Download) und wiederherstellen (Upload)
+# ---------------------------------------------------------------------------
+BACKUP_DIR = os.path.join(BASE, "backup-data")
+TMP_DIR = os.path.join(BASE, "tmp")
+MAX_UPLOAD = 300 * 1024 * 1024
+DATA_DIRS = ("data", "daten", "uploads", "print_history")
+DATA_NAMES = ("config.json", "markers.json")
+SKIP_DIRS = {".pylibs", "node_modules", "__pycache__", ".git", "logs", "log", "cache", ".cache", "tmp"}
+SKIP_NAMES = {"package-lock.json"}
+# Dateien ausserhalb des Programmordners (eigene Installation der Anwendung)
+EXTERN = {"klingel": ("/root/Klingel-Dashboard", ["config.ini"])}
+CONF_NAMES = ("config.json", "markers.json", "config.ini")
+
+
+def preserved(rel):
+    parts = rel.split("/")
+    if parts[-1] in DATA_NAMES:
+        return True
+    if rel.endswith((".db", ".sqlite", ".sqlite3")):
+        return True
+    return any(p in DATA_DIRS for p in parts[:-1])
+
+
+def repo_files(app_id):
+    return set(read(os.path.join(APPS_DIR, app_id, ".nc_files"), 10 ** 7).splitlines())
+
+
+def data_ok(rel, repo):
+    """Gehoert diese Datei (relativ zum Programmordner) zu den Einstellungen/Daten?"""
+    if rel.startswith(".nc_") or rel.endswith((".pyc", ".log", ".tmp")):
+        return False
+    if os.path.basename(rel) in SKIP_NAMES or any(p in SKIP_DIRS for p in rel.split("/")[:-1]):
+        return False
+    return preserved(rel) or (bool(repo) and rel not in repo)
+
+
+def collect(app_id):
+    """Liste (Archivname, voller Pfad) aller Einstellungs-/Datendateien der Anwendung."""
+    res = []
+    ad = os.path.join(APPS_DIR, app_id)
+    repo = repo_files(app_id)
+    for root, dirs, files in os.walk(ad):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for f in sorted(files):
+            full = os.path.join(root, f)
+            rel = os.path.relpath(full, ad).replace(os.sep, "/")
+            if data_ok(rel, repo) and os.path.isfile(full) and not os.path.islink(full):
+                res.append(("app/" + rel, full))
+    dd = os.path.join(BASE, "data", app_id)
+    for root, dirs, files in os.walk(dd):
+        for f in sorted(files):
+            full = os.path.join(root, f)
+            if os.path.isfile(full) and not os.path.islink(full):
+                res.append(("data/" + os.path.relpath(full, dd).replace(os.sep, "/"), full))
+    ex = EXTERN.get(app_id)
+    if ex:
+        for n in ex[1]:
+            full = os.path.join(ex[0], n)
+            if os.path.isfile(full):
+                res.append(("extern/" + n, full))
+    return res
+
+
+def svc_for(app_id):
+    out = []
+    p = "/etc/init.d/nc-" + app_id
+    if os.path.exists(p):
+        out.append(p)
+    elif app_id == "klingel":
+        try:
+            for n in sorted(os.listdir("/etc/init.d")):
+                fp = os.path.join("/etc/init.d", n)
+                if n.startswith("nc-") or not os.path.isfile(fp):
+                    continue
+                if re.search(r"klingel|doorbell", read(fp, 20000), re.I):
+                    out.append(fp)
+        except OSError:
+            pass
+    return out
+
+
+def svc_ctl(app_id, action):
+    for s in svc_for(app_id):
+        try:
+            subprocess.run([s, action], timeout=60, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+
+def build_zip(app_id):
+    """ZIP mit allen Einstellungs-/Datendateien in eine Temp-Datei schreiben (geoeffnet, Position 0)."""
+    import tempfile
+    import zipfile
+    os.makedirs(TMP_DIR, exist_ok=True)
+    tf = tempfile.TemporaryFile(dir=TMP_DIR)
+    entries = collect(app_id)
+    with zipfile.ZipFile(tf, "w", zipfile.ZIP_DEFLATED) as z:
+        manifest = dict(app=app_id, core=NC_VERSION, created=time.strftime("%Y-%m-%d %H:%M:%S"),
+                        files=[a for a, _ in entries])
+        z.writestr("nc-backup.json", json.dumps(manifest, indent=1, ensure_ascii=False))
+        for arc, full in entries:
+            try:
+                z.write(full, arc)
+            except OSError:
+                pass
+    tf.seek(0)
+    return tf, len(entries)
+
+
+def safety_backup(app_id):
+    """Sicherung vor dem Ueberschreiben; behaelt die letzten 3 je Anwendung."""
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    tf, n = build_zip(app_id)
+    if n:
+        with open(os.path.join(BACKUP_DIR, "%s-%s.zip" % (app_id, time.strftime("%Y%m%d-%H%M%S"))), "wb") as f:
+            while True:
+                b = tf.read(1 << 20)
+                if not b:
+                    break
+                f.write(b)
+    tf.close()
+    old = sorted(x for x in os.listdir(BACKUP_DIR) if x.startswith(app_id + "-") and x.endswith(".zip"))
+    for x in old[:-3]:
+        try:
+            os.remove(os.path.join(BACKUP_DIR, x))
+        except OSError:
+            pass
+
+
+def safe_join(root, rel):
+    rel = rel.replace("\\", "/").lstrip("/")
+    if not rel or any(p in ("..", "") for p in rel.split("/")) or ":" in rel.split("/")[0]:
+        return None
+    full = os.path.normpath(os.path.join(root, rel))
+    return full if full.startswith(os.path.normpath(root) + os.sep) else None
+
+
+def workdir_of(app_id):
+    ad = os.path.join(APPS_DIR, app_id)
+    wd = read(os.path.join(ad, ".nc_workdir"), 500)
+    return wd if wd and os.path.isdir(wd) else ad
+
+
+def restore_zip(app_id, tmp_path):
+    import zipfile
+    try:
+        z = zipfile.ZipFile(tmp_path)
+    except Exception:
+        return 400, dict(error="Die Datei ist kein gültiges ZIP-Archiv.")
+    with z:
+        try:
+            man = json.loads(z.read("nc-backup.json").decode("utf-8-sig"))
+        except Exception:
+            man = {}
+        if man.get("app") and man["app"] != app_id:
+            return 400, dict(error="Das ZIP gehört zu \"%s\", nicht zu \"%s\"." % (man["app"], app_id))
+        ad = os.path.join(APPS_DIR, app_id)
+        repo = repo_files(app_id)
+        targets = []
+        for info in z.infolist():
+            name = info.filename
+            if info.is_dir() or name == "nc-backup.json":
+                continue
+            if (info.external_attr >> 16) & 0o170000 == 0o120000:
+                continue  # keine symbolischen Links
+            if name.startswith("app/"):
+                rel = name[4:]
+                dest = safe_join(ad, rel)
+                if dest is None or not data_ok(rel, repo):
+                    continue
+            elif name.startswith("data/"):
+                dest = safe_join(os.path.join(BASE, "data", app_id), name[5:])
+                if dest is None:
+                    continue
+            elif name.startswith("extern/") and app_id in EXTERN:
+                n = name[7:]
+                if n not in EXTERN[app_id][1]:
+                    continue
+                dest = safe_join(EXTERN[app_id][0], n)
+                if dest is None:
+                    continue
+            else:
+                continue
+            targets.append((info, dest))
+        if not targets:
+            return 400, dict(error="Das ZIP enthält keine passenden Einstellungs-/Datendateien für diese Anwendung.")
+        safety_backup(app_id)
+        svc_ctl(app_id, "stop")
+        try:
+            for info, dest in targets:
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                with z.open(info) as src, open(dest + ".nc_new", "wb") as out:
+                    shutil.copyfileobj(src, out)
+                os.replace(dest + ".nc_new", dest)
+        except Exception as e:
+            svc_ctl(app_id, "start")
+            return 500, dict(error="Fehler beim Entpacken: %s" % e)
+    svc_ctl(app_id, "start")
+    return 200, dict(msg="%d Datei(en) wiederhergestellt, Dienst neu gestartet." % len(targets))
+
+
+def restore_file(app_id, tmp_path, name):
+    name = os.path.basename(name or "")
+    if not name:
+        return 400, dict(error="Dateiname fehlt.")
+    raw = open(tmp_path, "rb").read()
+    if name.lower().endswith(".json"):
+        try:
+            json.loads(raw.decode("utf-8-sig"))
+        except Exception:
+            return 400, dict(error="Keine gültige JSON-Datei.")
+    cands = [full for arc, full in collect(app_id) if os.path.basename(arc) == name]
+    if len(cands) == 1:
+        dest = cands[0]
+    elif len(cands) > 1:
+        return 400, dict(error="Der Dateiname \"%s\" ist mehrdeutig - bitte ein ZIP verwenden." % name)
+    elif app_id in EXTERN and name in EXTERN[app_id][1]:
+        dest = os.path.join(EXTERN[app_id][0], name)
+    elif name in CONF_NAMES and os.path.exists(os.path.join(APPS_DIR, app_id, ".nc_ok")):
+        dest = os.path.join(workdir_of(app_id), name)
+    else:
+        return 400, dict(error="Unbekannte Datei \"%s\". Bitte die Sicherung (ZIP) dieses Dienstes hochladen." % name)
+    safety_backup(app_id)
+    svc_ctl(app_id, "stop")
+    try:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest + ".nc_new", "wb") as f:
+            f.write(raw)
+        os.replace(dest + ".nc_new", dest)
+    except Exception as e:
+        svc_ctl(app_id, "start")
+        return 500, dict(error="Fehler beim Schreiben: %s" % e)
+    svc_ctl(app_id, "start")
+    return 200, dict(msg="%s ersetzt, Dienst neu gestartet." % name)
+
+
+def files_info(app_id):
+    items = []
+    for arc, full in collect(app_id):
+        try:
+            items.append(dict(path=arc.split("/", 1)[1] if arc.startswith(("app/", "data/", "extern/")) else arc,
+                              size=os.path.getsize(full)))
+        except OSError:
+            pass
+    backups = []
+    if os.path.isdir(BACKUP_DIR):
+        backups = sorted(x for x in os.listdir(BACKUP_DIR) if x.startswith(app_id + "-") and x.endswith(".zip"))[-3:]
+    return dict(files=items[:60], total=len(items),
+                size=sum(i["size"] for i in items), backups=backups)
+
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -1008,8 +1324,40 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_file(self, f, filename):
+        f.seek(0, 2)
+        size = f.tell()
+        f.seek(0)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition", 'attachment; filename="%s"' % filename)
+        self.send_header("Content-Length", str(size))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        shutil.copyfileobj(f, self.wfile, 1 << 16)
+
+    def _app_id(self):
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        aid = q.get("id", [""])[0]
+        ok = aid in [a["id"] for a in load_apps()] and os.path.exists(os.path.join(APPS_DIR, aid, ".nc_ok"))
+        return (aid if ok else None), q
+
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path
+        if path == "/api/files":
+            aid, _ = self._app_id()
+            if not aid:
+                return self._send(404, json.dumps(dict(error="nicht installiert")))
+            return self._send(200, json.dumps(files_info(aid)))
+        if path == "/api/backup":
+            aid, _ = self._app_id()
+            if not aid:
+                return self._send(404, json.dumps(dict(error="nicht installiert")))
+            tf, n = build_zip(aid)
+            try:
+                return self._send_file(tf, "%s-daten-%s.zip" % (aid, time.strftime("%Y%m%d-%H%M")))
+            finally:
+                tf.close()
         if path == "/":
             self._send(200, INDEX, "text/html")
         elif path == "/api/status":
@@ -1044,6 +1392,49 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, json.dumps(dict(error="unbekannte Anwendung")))
             ok = start_uninstall(target, mode)
             return self._send(200 if ok else 409, json.dumps(dict(started=ok)))
+        if u.path == "/api/restore":
+            global _restoring
+            aid, q = self._app_id()
+            length = int(self.headers.get("Content-Length") or 0)
+            if not aid:
+                self.close_connection = True
+                return self._send(404, json.dumps(dict(error="Anwendung nicht installiert")))
+            if length <= 0 or length > MAX_UPLOAD:
+                self.close_connection = True
+                return self._send(413, json.dumps(dict(error="Datei leer oder gr\u00f6\u00dfer als %d MB" % (MAX_UPLOAD >> 20))))
+            with _lock:
+                if running():
+                    self.close_connection = True
+                    return self._send(409, json.dumps(dict(error="Es l\u00e4uft gerade eine andere Aktion.")))
+                _restoring = True
+            tmp = os.path.join(TMP_DIR, "upload-%d.bin" % os.getpid())
+            try:
+                os.makedirs(TMP_DIR, exist_ok=True)
+                left = length
+                with open(tmp, "wb") as f:
+                    while left > 0:
+                        chunk = self.rfile.read(min(1 << 16, left))
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        left -= len(chunk)
+                if left > 0:
+                    return self._send(400, json.dumps(dict(error="Upload unvollst\u00e4ndig")))
+                with open(tmp, "rb") as f:
+                    is_zip = f.read(4) == b"PK\x03\x04"
+                if is_zip:
+                    code, res = restore_zip(aid, tmp)
+                else:
+                    code, res = restore_file(aid, tmp, q.get("name", [""])[0])
+                return self._send(code, json.dumps(res))
+            except Exception as e:
+                return self._send(500, json.dumps(dict(error=str(e))))
+            finally:
+                _restoring = False
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
         if u.path == "/api/selfupdate":
             ok = start_selfupdate()
             return self._send(200 if ok else 409, json.dumps(dict(started=ok)))
