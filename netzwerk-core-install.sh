@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-#  Netzwerk-Core Installer v1.7.1 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
+#  Netzwerk-Core Installer v1.7.2 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
 #
 #  Einmal per SSH ausfuehren:   sh netzwerk-core-install.sh
 #
@@ -284,23 +284,20 @@ python_deps() {
     if grep -q '[^[:space:]]' "$tmp/req.txt" && { [ "$sum" != "$(cat "$appdir/.nc_req" 2>/dev/null)" ] || [ ! -d "$appdir/.pylibs" ]; }; then
         log "Installiere Python-Pakete ..."
         if python3 -m pip install --no-cache-dir --disable-pip-version-check --upgrade \
-              --target "$appdir/.pylibs" -r "$tmp/req.txt"; then
+              --only-binary=pillow,numpy,scipy,pandas,lxml,cryptography --target "$appdir/.pylibs" -r "$tmp/req.txt"; then
             echo "$sum" > "$appdir/.nc_req"
         else
-            # Einzeln nachinstallieren, bei Fehlern ohne feste Version (neuere Versionen haben oft passende Wheels)
-            log "Gesamtinstallation fehlgeschlagen - installiere Pakete einzeln ..."
-            bad=0
-            while IFS= read -r pk; do
-                [ -n "$(echo "$pk" | tr -d ' \r')" ] || continue
-                python3 -m pip install --no-cache-dir --disable-pip-version-check --upgrade --target "$appdir/.pylibs" "$pk" >/dev/null 2>&1 && continue
-                pn=$(echo "$pk" | sed 's/[=<>~!;[ ].*//')
-                if python3 -m pip install --no-cache-dir --disable-pip-version-check --upgrade --target "$appdir/.pylibs" "$pn" >/dev/null 2>&1; then
-                    log "  $pn: ohne feste Version installiert"
-                else
-                    log "  WARNUNG: Paket $pn nicht installierbar"; bad=$((bad+1))
-                fi
-            done < "$tmp/req.txt"
-            if [ $bad -gt 0 ]; then log "FEHLER: $bad Paket(e) fehlen - die Anwendung startet evtl. nicht"; return 1; fi
+            # Gesamtinstallation scheitert oft an Paketen, die sich auf dem Router nicht bauen lassen
+            # (z. B. Pillow). Dann: Pakete einzeln, schwere Zusatzpakete werden uebersprungen.
+            log "Gesamtinstallation fehlgeschlagen - installiere Pakete einzeln (ohne nicht baubare Zusatzpakete) ..."
+            out=$(python3 "$BASE/bin/nc-pipdeps.py" "$appdir/.pylibs" "$tmp/req.txt" 2>&1); rc=$?
+            echo "$out" | while IFS= read -r l; do log "  $l"; done
+            skipped=$(echo "$out" | sed -n 's/^SKIPPED //p' | tr '\n' ' ')
+            if echo " $skipped" | grep -q ' pillow '; then
+                opkg install python3-pillow >/dev/null 2>&1 && log "  python3-pillow per opkg installiert"
+            fi
+            if [ $rc -ne 0 ]; then log "FEHLER: erforderliche Pakete fehlen (siehe oben)"; return 1; fi
+            [ -n "$skipped" ] && log "HINWEIS: optionale Pakete fehlen: $skipped- betrifft nur Funktionen, die sie brauchen (z. B. PDF mit Bildern)"
             echo "$sum" > "$appdir/.nc_req"
         fi
     fi
@@ -579,6 +576,94 @@ log "$name wurde deinstalliert. Mit \"Installieren\" auf der Kachel jederzeit wi
 NC_UNINSTALL_EOF
 
 # ---------------------------------------------------------------------------
+# Hilfsprogramm fuer Python-Pakete, die sich auf dem Router nicht bauen lassen
+# ---------------------------------------------------------------------------
+cat > "$BASE/bin/nc-pipdeps.py" <<'NC_PIPDEPS_EOF'
+#!/usr/bin/python3
+# Netzwerk-Core: Python-Pakete installieren, wenn die Gesamtinstallation scheitert
+# (z. B. weil Pillow auf dem Router nicht gebaut werden kann: kein C-Compiler, kein Wheel).
+# 1) die gelisteten Pakete ohne Abhaengigkeiten, 2) Abhaengigkeiten einzeln: erst als fertiges
+# Wheel, bei reinem Python notfalls aus dem Quelltext, schwere Native-Pakete werden uebersprungen.
+import glob, os, re, subprocess, sys
+
+target, req = sys.argv[1], sys.argv[2]
+HEAVY = {"pillow", "numpy", "scipy", "pandas", "lxml", "cryptography", "pydantic-core", "grpcio",
+         "opencv-python", "matplotlib", "scikit-learn", "cffi", "pyzmq", "psycopg2"}
+FORCE_FAIL = set(os.environ.get("NC_PIP_SKIP", "").split())   # Testhilfe
+PIP = [sys.executable, "-m", "pip", "install", "--no-cache-dir", "--disable-pip-version-check",
+       "--upgrade", "--target", target]
+
+
+def norm(n):
+    return re.sub(r"[-_.]+", "-", n).lower()
+
+
+def run(args):
+    return subprocess.run(PIP + args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
+
+def pkg_ok(spec, binary_only=False):
+    name = norm(re.split(r"[=<>~!;\[ ]", spec, 1)[0])
+    if name in FORCE_FAIL:
+        return False
+    return run((["--only-binary=:all:"] if binary_only else []) + ["--no-deps", spec])
+
+
+try:
+    from pip._vendor.packaging.requirements import Requirement
+except Exception:
+    Requirement = None
+
+fatal = 0
+for line in open(req, encoding="utf-8", errors="replace").read().splitlines():
+    line = line.split("#", 1)[0].strip()
+    if not line or line.startswith("-"):
+        continue
+    name = norm(re.split(r"[=<>~!;\[ ]", line, 1)[0])
+    if pkg_ok(line) or pkg_ok(name):
+        print("OK " + name)
+    elif name in HEAVY:
+        print("SKIPPED " + name)
+    else:
+        print("FEHLT " + line)
+        fatal += 1
+
+skip = set()
+for _ in range(6):
+    have = {norm(os.path.basename(d)[:-10].rsplit("-", 1)[0]) for d in glob.glob(os.path.join(target, "*.dist-info"))}
+    todo = {}
+    for meta in glob.glob(os.path.join(target, "*.dist-info", "METADATA")):
+        for l in open(meta, encoding="utf-8", errors="replace"):
+            if not l.startswith("Requires-Dist:"):
+                continue
+            txt = l.split(":", 1)[1].strip()
+            if Requirement is not None:
+                try:
+                    r = Requirement(txt)
+                    if r.marker is not None and not r.marker.evaluate({"extra": ""}):
+                        continue
+                    nm, spec = norm(r.name), r.name + str(r.specifier)
+                except Exception:
+                    continue
+            else:
+                if "extra" in txt:
+                    continue
+                spec = re.split(r"[;(]", txt, 1)[0].strip()
+                nm = norm(re.split(r"[=<>~!\[ ]", spec, 1)[0])
+            if nm not in have and nm not in skip:
+                todo[nm] = spec
+    if not todo:
+        break
+    for nm, spec in todo.items():
+        if pkg_ok(spec, True) or (nm not in HEAVY and pkg_ok(spec)) or pkg_ok(nm, True):
+            print("OK " + nm)
+        else:
+            skip.add(nm)
+            print("SKIPPED " + nm)
+sys.exit(1 if fatal else 0)
+NC_PIPDEPS_EOF
+
+# ---------------------------------------------------------------------------
 # Selbst-Update: neueste Version dieses Skripts aus GitHub holen und im
 # Update-Modus ausfuehren (wird von der Statusseite aufgerufen)
 # ---------------------------------------------------------------------------
@@ -654,7 +739,7 @@ cat > "$BASE/bin/nc-core.py" <<'NC_CORE_EOF'
 import json, os, re, shutil, socket, subprocess, threading, time, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-NC_VERSION = "1.7.1"
+NC_VERSION = "1.7.2"
 BASE = os.environ.get("NC_BASE", "/root/Netzwerk-Core")
 PORT = int(os.environ.get("NC_PORT", "8090"))
 OWNER = "Scorch1262"
