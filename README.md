@@ -81,6 +81,16 @@ Die Kacheln sind in Gruppen geordnet (IoT / SmartHome, Planungs Tools, Werkstatt
 
 ![HomeKit2MQTT-Hilfe](docs/homekit-hilfe.png)
 
+## Bereits vorhandene Dienste übernehmen
+
+Läuft auf dem Router schon einer der Dienste, der ohne dieses Script eingerichtet wurde (z. B. in `/root/Outfit-Dashboard`), wird er beim Installieren automatisch erkannt und **übernommen**:
+
+- Ordner, Dateien und Einstellungen bleiben unverändert am bisherigen Ort. Im Verzeichnis `apps/` entsteht nur eine Verknüpfung, die Kachel zeigt auf den bestehenden Dienst.
+- Port und Status stammen vom laufenden Dienst bzw. aus dessen `config.json`; der bisherige Autostart-Dienst läuft weiter und wird vom Neustart-Button der Kachel mitgesteuert.
+- Die Kachel zeigt „Update verfügbar“, bis der Dienst einmal über Netzwerk-Core aktualisiert wurde. Dabei wird vorher eine Sicherung des Ordners unter `/root/Netzwerk-Core/backup-adopted/` angelegt, Einstellungsdateien bleiben erhalten, der bisherige Autostart wird durch den von Netzwerk-Core ersetzt (die alte Datei bleibt, nur deaktiviert).
+- Beim Deinstallieren einer übernommenen Installation wird nur die Verknüpfung gelöst; der ursprüngliche Ordner bleibt erhalten.
+- Nicht übernommen wird HomeKit2MQTT (eigene Daten und Zugangsdaten werden vom Script angelegt).
+
 ## Neue Anwendung hinzufügen
 
 Eine Zeile in `/root/Netzwerk-Core/apps.conf` ergänzen (Format steht in der Kopfzeile der Datei) und auf der Statusseite *Installieren* klicken. Private Repos: GitHub-Token in `/root/Netzwerk-Core/github_token` ablegen.

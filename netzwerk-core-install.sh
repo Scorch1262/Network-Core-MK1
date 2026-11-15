@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-#  Netzwerk-Core Installer v1.7.4 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
+#  Netzwerk-Core Installer v1.7.5 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
 #
 #  Einmal per SSH ausfuehren:   sh netzwerk-core-install.sh
 #
@@ -98,7 +98,11 @@ gh_curl() {
 }
 
 app_ids()   { grep -v -E '^[[:space:]]*(#|$)' "$CONF" | cut -d'|' -f1; }
-app_field() { grep "^$1|" "$CONF" | head -n1 | cut -d'|' -f"$2"; }
+app_field() {
+    # uebernommene Dienste laufen evtl. auf einem anderen Port als im Katalog
+    if [ "$2" = 4 ] && [ -s "$BASE/adopted/$1.port" ]; then cat "$BASE/adopted/$1.port"; return; fi
+    grep "^$1|" "$CONF" | head -n1 | cut -d'|' -f"$2"
+}
 
 # Entfernte Dienste (werden bei "Alle aktualisieren" / Neuinstallation uebersprungen)
 is_removed() { grep -qx "$1" "$BASE/removed.list" 2>/dev/null; }
@@ -356,6 +360,75 @@ init_homekit() {
     log "HomeKit-Pincode: $(cat "$d/pincode")   (Datei: $d/pincode, Web-UI-Login: homekit / Pincode)"
 }
 
+# Bereits vorhandene Installation (ohne Netzwerk-Core eingerichtet) uebernehmen: Ordner und
+# Einstellungen bleiben unveraendert am bisherigen Ort, die Kachel wird damit verknuepft.
+adopt_app() {   # id  -> 0 = uebernommen
+    id="$1"; appdir="$BASE/apps/$id"
+    [ -f "$appdir/.nc_ok" ] && return 1
+    if [ -e "$appdir" ] && [ ! -L "$appdir" ] && [ -n "$(ls -A "$appdir" 2>/dev/null)" ]; then return 1; fi
+    [ -f "$BASE/bin/nc-adopt.py" ] || return 1
+    res=$(python3 "$BASE/bin/nc-adopt.py" "$id" "$(app_field "$id" 3)" "$(app_field "$id" 5)" \
+          "$(grep "^$id|" "$CONF" | head -n1 | cut -d'|' -f4)" "$(app_field "$id" 6)" 2>/dev/null) || return 1
+    dir=$(echo "$res" | sed -n 's/^DIR=//p' | head -n1)
+    wd=$(echo "$res" | sed -n 's/^WORKDIR=//p' | head -n1)
+    nport=$(echo "$res" | sed -n 's/^PORT=//p' | head -n1)
+    svcs=$(echo "$res" | sed -n 's/^SVC=//p')
+    [ -n "$dir" ] || [ -n "$svcs" ] || return 1
+    mkdir -p "$BASE/adopted"
+    if [ -n "$dir" ]; then
+        rmdir "$appdir" 2>/dev/null; rm -f "$appdir" 2>/dev/null
+        ln -s "$dir" "$appdir" || return 1
+    else
+        mkdir -p "$appdir"
+    fi
+    echo "$dir" > "$BASE/adopted/$id.dir"
+    echo "$svcs" | sed '/^$/d' > "$BASE/adopted/$id.svc"
+    if [ -n "$nport" ]; then echo "$nport" > "$BASE/adopted/$id.port"; else rm -f "$BASE/adopted/$id.port"; fi
+    echo "$(app_field "$id" 3)" > "$appdir/.nc_repo"
+    [ -n "$wd" ] && echo "$wd" > "$appdir/.nc_workdir"
+    echo adopted > "$appdir/.nc_sha"
+    touch "$appdir/.nc_ok"
+    unmark_removed "$id"
+    log "=== $(app_field "$id" 2): vorhandene Installation uebernommen ==="
+    [ -n "$dir" ] && log "  Ordner:  $dir (bleibt unveraendert an diesem Ort)"
+    [ -n "$nport" ] && log "  Port:    $nport (aus laufendem Dienst bzw. Konfiguration)"
+    for sv in $svcs; do log "  Dienst:  $(basename "$sv") (bleibt aktiv, wird von der Kachel mitgesteuert)"; done
+    log "  Hinweis: Die Kachel zeigt 'Update verfuegbar', bis einmal aktualisiert wurde (vorher Sicherung)."
+    return 0
+}
+
+# Erste Aktualisierung einer uebernommenen Installation: Sicherung des Ordners anlegen
+adopted_backup() {   # id
+    id="$1"; appdir="$BASE/apps/$id"
+    [ "$(cat "$appdir/.nc_sha" 2>/dev/null)" = adopted ] || return 0
+    [ -L "$appdir" ] || return 0
+    real=$(readlink -f "$appdir")
+    kb=$(du -sk "$real" 2>/dev/null | cut -f1); [ -n "$kb" ] || kb=0
+    if [ "$kb" -gt 153600 ]; then
+        log "Sicherung uebersprungen (Ordner $((kb/1024)) MB gross): $real"
+        return 0
+    fi
+    mkdir -p "$BASE/backup-adopted"
+    bf="$BASE/backup-adopted/$id-$(date +%Y%m%d-%H%M).tar.gz"
+    if tar czf "$bf" -C "$(dirname "$real")" "$(basename "$real")" 2>/dev/null; then
+        log "Sicherung der bisherigen Installation: $bf"
+    else
+        rm -f "$bf"; log "WARNUNG: Sicherung der bisherigen Installation fehlgeschlagen"
+    fi
+}
+
+# Bisherige Autostart-Dienste einer uebernommenen Installation ablegen, damit nc-<id> den Port bekommt
+adopted_retire() {   # id
+    id="$1"
+    [ -s "$BASE/adopted/$id.svc" ] || return 0
+    while IFS= read -r sv; do
+        [ -x "$sv" ] || continue
+        "$sv" stop >/dev/null 2>&1; "$sv" disable >/dev/null 2>&1
+        log "Bisheriger Autostart-Dienst deaktiviert: $(basename "$sv") (Datei bleibt erhalten)"
+    done < "$BASE/adopted/$id.svc"
+    : > "$BASE/adopted/$id.svc"
+}
+
 # Anwendung installieren bzw. aktualisieren
 deploy_app() {   # id
     id="$1"
@@ -364,6 +437,7 @@ deploy_app() {   # id
     args=$(app_field "$id" 9)
     [ -n "$repo" ] || { log "Unbekannte Anwendung: $id"; return 1; }
     appdir="$BASE/apps/$id"
+    if [ ! -f "$appdir/.nc_ok" ] && adopt_app "$id"; then return 0; fi
     log "=== $name ($repo) ==="
 
     tmp=$(mktemp -d /tmp/nc.XXXXXX)
@@ -376,6 +450,7 @@ deploy_app() {   # id
     [ -d "$src" ] || { log "FEHLER: Archiv leer"; rm -rf "$tmp"; return 1; }
 
     mkdir -p "$appdir"
+    adopted_backup "$id"
 
     # Repo gewechselt (z. B. MQTT-Dashboard-MK3 -> MK4): alte Dateien entfernen,
     # Einstellungen (*.json) vorher sichern und fuer die neue Version bereitstellen
@@ -476,6 +551,7 @@ deploy_app() {   # id
     esac
 
     ensure_pyshims
+    adopted_retire "$id"
     # Startskript + Autostart (procd)
     cat > "$BASE/run/$id.sh" <<RUN_EOF
 #!/bin/sh
@@ -564,7 +640,19 @@ for pid in $(ps 2>/dev/null | grep -F "$appdir/" | grep -v grep | awk '{print $1
 done
 
 rm -f "$BASE/run/$id.sh" "$appdir/.nc_ok" "$appdir/.nc_sha" "$appdir/.nc_workdir"
-if [ "$mode" = "delete" ]; then
+if [ -L "$appdir" ] || [ -e "$BASE/adopted/$id.dir" ]; then
+    # uebernommene Installation: bisherige Dienste stoppen, Verknuepfung loesen, Original-Ordner bleibt
+    if [ -s "$BASE/adopted/$id.svc" ]; then
+        while IFS= read -r sv; do
+            [ -x "$sv" ] && { "$sv" stop >/dev/null 2>&1; "$sv" disable >/dev/null 2>&1; log "Dienst gestoppt und deaktiviert: $(basename "$sv")"; }
+        done < "$BASE/adopted/$id.svc"
+    fi
+    real=$(readlink -f "$appdir" 2>/dev/null)
+    [ -n "$real" ] && rm -f "$real"/.nc_repo "$real"/.nc_files "$real"/.nc_req 2>/dev/null
+    rm -f "$appdir"; rmdir "$appdir" 2>/dev/null
+    rm -f "$BASE/adopted/$id.dir" "$BASE/adopted/$id.svc" "$BASE/adopted/$id.port"
+    log "Der urspruengliche Ordner ${real:-} bleibt unveraendert erhalten."
+elif [ "$mode" = "delete" ]; then
     rm -rf "$appdir" "$BASE/data/$id"
     log "Programmdateien und Daten geloescht."
 else
@@ -664,6 +752,188 @@ sys.exit(1 if fatal else 0)
 NC_PIPDEPS_EOF
 
 # ---------------------------------------------------------------------------
+# Erkennung bereits vorhandener Installationen (ohne Netzwerk-Core eingerichtet)
+# ---------------------------------------------------------------------------
+cat > "$BASE/bin/nc-adopt.py" <<'NC_ADOPT_EOF'
+#!/usr/bin/python3
+# Netzwerk-Core: bereits vorhandene Installation eines Dienstes finden (ohne etwas zu aendern).
+# Aufruf: nc-adopt.py <id> <repo> <startdatei> <katalog-port> [unterordner]
+# Ausgabe (nur wenn gefunden): DIR=, WORKDIR=, PORT= (nur wenn abweichend), SVC= (je Autostart-Skript)
+import glob, json, os, re, sys
+
+BASE = os.environ.get("NC_BASE", "/root/Netzwerk-Core")
+ROOTS = os.environ.get("NC_ADOPT_ROOTS", "/root:/opt:/srv:/usr/local:/mnt:/home").split(":")
+INITD = os.environ.get("NC_INITD", "/etc/init.d")
+PROC = os.environ.get("NC_PROC", "/proc")
+SKIPDIRS = {"node_modules", "__pycache__", "site-packages", "dist-packages", ".git", "tmp", "lib", "share",
+            "backup", "backup-core", "backup-data", "backup-adopted", "bin", "include", "venv", ".venv"}
+
+
+def norm(s):
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def main(argv):
+    aid, repo, entry, cport = argv[1], argv[2], argv[3], int(argv[4] or 0)
+    subdir = argv[5] if len(argv) > 5 else ""
+    if aid in ("homekit",):
+        return 1
+    base = repo.split("/")[-1]
+    full = norm(base)
+    short = norm(re.sub(r"-?MK\d+$", "", base, flags=re.I))
+    claimed = set()
+    for f in glob.glob(os.path.join(BASE, "adopted", "*.dir")):
+        try:
+            claimed.add(os.path.realpath(open(f).read().strip()))
+        except OSError:
+            pass
+
+    def name_ok(d):
+        n = norm(d)
+        if not n:
+            return False
+        if n == full or n == short or (len(aid) >= 5 and n == aid):
+            return True
+        if short and short in n and len(short) >= 8:        # z. B. "MQTT-Dashboard-MK3-main"
+            return True
+        return len(n) >= 10 and n in short and len(n) / float(len(short) or 1) >= 0.6   # z. B. "Outfit-Dashboard"
+
+    def vdirs(p):
+        try:
+            v = sorted((x for x in glob.glob(os.path.join(p, "V[0-9]*")) if os.path.isdir(x)),
+                       key=lambda x: [int(t) for t in re.findall(r"\d+", os.path.basename(x))])
+        except Exception:
+            v = []
+        return v[-1:]
+
+    def workdir_of(d):
+        cands = [d]
+        if subdir:
+            cands.append(os.path.join(d, subdir))
+        cands += vdirs(d)
+        if subdir:
+            cands += vdirs(os.path.join(d, subdir))
+        for c in cands:
+            if entry.startswith("@"):
+                if os.path.isfile(os.path.join(c, entry[1:])) or glob.glob(os.path.join(c, "*.py")):
+                    return c
+            else:
+                names = [entry] if entry and entry != "auto" else []
+                for n in names + ["app.py", "main.py", "server.py"]:
+                    if os.path.isfile(os.path.join(c, n)):
+                        return c
+        return ""
+
+    found = []
+    nb = os.path.realpath(BASE)
+    for r in ROOTS:
+        if not r or not os.path.isdir(r):
+            continue
+        r = os.path.realpath(r)
+        for dirpath, dirs, _ in os.walk(r):
+            depth = dirpath[len(r):].count(os.sep)
+            dirs[:] = [x for x in dirs if not x.startswith(".") and x not in SKIPDIRS
+                       and os.path.realpath(os.path.join(dirpath, x)) != nb]
+            if depth >= 3:
+                dirs[:] = []
+            for x in dirs:
+                p = os.path.join(dirpath, x)
+                if os.path.islink(p) or not name_ok(x) or os.path.realpath(p) in claimed:
+                    continue
+                wd = workdir_of(p)
+                if wd:
+                    found.append((depth, -os.path.getmtime(p), p, wd))
+    services = []
+    if not found and not entry.startswith("@"):
+        return 1
+    found.sort()
+    d, wd = ("", "")
+    if found:
+        d, wd = found[0][2], found[0][3]
+
+    # Autostart-Skripte, die diesen Ordner (oder bei der Klingel: Klingel/Doorbell) verwenden
+    try:
+        for n in sorted(os.listdir(INITD)):
+            fp = os.path.join(INITD, n)
+            if n.startswith("nc-") or not os.path.isfile(fp):
+                continue
+            try:
+                txt = open(fp, encoding="utf-8", errors="replace").read(20000)
+            except OSError:
+                continue
+            if (d and d in txt) or (entry.startswith("@") and re.search(r"klingel|doorbell", txt, re.I)):
+                services.append(fp)
+    except OSError:
+        pass
+    if not d and not services:
+        return 1
+
+    # Port: laufender Prozess (Ordner als Arbeitsverzeichnis) -> config.json -> Katalog
+    ports = set()
+    try:
+        inode_port = {}
+        for t in ("tcp", "tcp6"):
+            try:
+                lines = open(os.path.join(PROC, "net", t)).read().splitlines()[1:]
+            except OSError:
+                continue
+            for l in lines:
+                f = l.split()
+                if len(f) > 9 and f[3] == "0A":
+                    inode_port[f[9]] = int(f[1].rsplit(":", 1)[1], 16)
+        if d:
+            for pid in os.listdir(PROC):
+                if not pid.isdigit():
+                    continue
+                pp = os.path.join(PROC, pid)
+                try:
+                    cwd = os.path.realpath(os.path.join(pp, "cwd"))
+                    cmd = open(os.path.join(pp, "cmdline"), "rb").read().replace(b"\0", b" ").decode("utf-8", "replace")
+                except OSError:
+                    continue
+                if not (cwd == os.path.realpath(d) or cwd.startswith(os.path.realpath(d) + os.sep) or d in cmd):
+                    continue
+                for fd in glob.glob(os.path.join(pp, "fd", "*")):
+                    try:
+                        m = re.match(r"socket:\[(\d+)\]", os.readlink(fd))
+                    except OSError:
+                        continue
+                    if m and m.group(1) in inode_port:
+                        ports.add(inode_port[m.group(1)])
+    except Exception:
+        pass
+    port = 0
+    if ports:
+        port = cport if cport in ports else min(ports)
+    elif wd:
+        for cf in (os.path.join(wd, "config.json"), os.path.join(d, "config.json")):
+            try:
+                j = json.load(open(cf, encoding="utf-8-sig"))
+            except Exception:
+                continue
+            v = (j.get("server") or {}).get("port") if isinstance(j.get("server"), dict) else None
+            v = v or j.get("port")
+            try:
+                v = int(v)
+            except (TypeError, ValueError):
+                continue
+            if 0 < v < 65536:
+                port = v
+                break
+
+    print("DIR=" + d)
+    print("WORKDIR=" + wd)
+    if port and port != cport:
+        print("PORT=%d" % port)
+    for s in services:
+        print("SVC=" + s)
+    return 0
+
+
+sys.exit(main(sys.argv))
+NC_ADOPT_EOF
+
+# ---------------------------------------------------------------------------
 # Selbst-Update: neueste Version dieses Skripts aus GitHub holen und im
 # Update-Modus ausfuehren (wird von der Statusseite aufgerufen)
 # ---------------------------------------------------------------------------
@@ -739,7 +1009,7 @@ cat > "$BASE/bin/nc-core.py" <<'NC_CORE_EOF'
 import json, os, re, shutil, socket, subprocess, threading, time, urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-NC_VERSION = "1.7.4"
+NC_VERSION = "1.7.5"
 BASE = os.environ.get("NC_BASE", "/root/Netzwerk-Core")
 PORT = int(os.environ.get("NC_PORT", "8090"))
 OWNER = "Scorch1262"
@@ -776,6 +1046,9 @@ def load_apps():
             port = int(p[3])
         except ValueError:
             port = 0
+        ov = read(os.path.join(BASE, "adopted", p[0] + ".port"), 10)
+        if ov.isdigit():
+            port = int(ov)
         apps.append(dict(id=p[0], name=p[1], repo=p[2], port=port,
                          subdir=p[5], desc=p[7]))
     return apps
@@ -835,6 +1108,7 @@ def app_status(a):
                 up=port_up(a["port"]),
                 version=app_version(wd, d) if installed else "",
                 help=(a["id"] == "homekit"),
+                adopted=(read(os.path.join(BASE, "adopted", a["id"] + ".dir"), 400) or "Dienst") if os.path.exists(os.path.join(BASE, "adopted", a["id"] + ".dir")) else "",
                 update=bool(installed and local and remote and local != remote))
 
 
@@ -1174,6 +1448,7 @@ function renderSettings(){
   c.append(el('span',null,'Status'),el('span',null,stat));
   c.append(el('span',null,'Port'),el('span',null,String(a.port)+(a.open_port&&a.open_port!==a.port?' (Einrichtung: '+a.open_port+')':'')));
   if(a.version)c.append(el('span',null,'Version'),el('span',null,'v'+a.version));
+  if(a.adopted)c.append(el('span',null,'Übernommen'),el('span',null,a.adopted));
   if(a.update){const u=el('span');u.append(el('span','badge','Update verfügbar'));c.append(el('span',null,'Update'),u);}
   b.append(c);
   if(busy)b.append(el('p','desc','Es läuft gerade eine Aktion - Ablauf im Protokoll unten auf der Seite.'));
@@ -1371,6 +1646,8 @@ def svc_for(app_id):
     p = "/etc/init.d/nc-" + app_id
     if os.path.exists(p):
         out.append(p)
+    elif [x for x in read(os.path.join(BASE, "adopted", app_id + ".svc"), 4000).split() if os.path.exists(x)]:
+        out.extend(x for x in read(os.path.join(BASE, "adopted", app_id + ".svc"), 4000).split() if os.path.exists(x))
     elif app_id == "mosquitto" and os.path.exists("/etc/init.d/mosquitto"):
         out.append("/etc/init.d/mosquitto")
     elif app_id == "klingel":
