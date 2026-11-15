@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-#  Netzwerk-Core Installer v1.7.3 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
+#  Netzwerk-Core Installer v1.7.4 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
 #
 #  Einmal per SSH ausfuehren:   sh netzwerk-core-install.sh
 #
@@ -739,7 +739,7 @@ cat > "$BASE/bin/nc-core.py" <<'NC_CORE_EOF'
 import json, os, re, shutil, socket, subprocess, threading, time, urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-NC_VERSION = "1.7.3"
+NC_VERSION = "1.7.4"
 BASE = os.environ.get("NC_BASE", "/root/Netzwerk-Core")
 PORT = int(os.environ.get("NC_PORT", "8090"))
 OWNER = "Scorch1262"
@@ -1177,8 +1177,20 @@ function renderSettings(){
   if(a.update){const u=el('span');u.append(el('span','badge','Update verfügbar'));c.append(el('span',null,'Update'),u);}
   b.append(c);
   if(busy)b.append(el('p','desc','Es läuft gerade eine Aktion - Ablauf im Protokoll unten auf der Seite.'));
-  if(a.manage){
+  if(a.installed){
     b.append(el('h4',null,'Dienst'));
+    const rr=el('div','row2');
+    const rb=el('button','sec','↻ Neustarten');rb.disabled=busy;
+    rb.onclick=async()=>{
+      if(!confirm(a.name+' neu starten?'+(a.id==='mosquitto'?' Alle MQTT-Verbindungen werden kurz getrennt.':'')))return;
+      rb.disabled=true;
+      try{await fetch('/api/restart?id='+encodeURIComponent(a.id),{method:'POST'});}catch(e){}
+      closeModal();load();loadLog();
+    };
+    rr.append(rb);b.append(rr);
+  }
+  if(a.manage){
+    if(!a.installed)b.append(el('h4',null,'Dienst'));
     const r=el('div','row2');
     const u=el('button',a.update||!a.installed?'':'sec',a.installed?'Update':'Installieren');
     u.disabled=busy;u.onclick=()=>{upd(a.id);closeModal();};r.append(u);
@@ -1359,6 +1371,8 @@ def svc_for(app_id):
     p = "/etc/init.d/nc-" + app_id
     if os.path.exists(p):
         out.append(p)
+    elif app_id == "mosquitto" and os.path.exists("/etc/init.d/mosquitto"):
+        out.append("/etc/init.d/mosquitto")
     elif app_id == "klingel":
         try:
             for n in sorted(os.listdir("/etc/init.d")):
@@ -1378,6 +1392,27 @@ def svc_ctl(app_id, action):
             subprocess.run([s, action], timeout=60, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
+
+
+def restart_service(app_id):
+    """Dienst neu starten (im Hintergrund); Ablauf steht im Protokoll, Port wird abschliessend geprueft."""
+    global _restoring
+    port = 1883 if app_id == "mosquitto" else next((a["port"] for a in load_apps() if a["id"] == app_id), 0)
+    try:
+        with open(LOG, "w") as f:
+            f.write("Neustart von %s ...\n" % app_id)
+        svc_ctl(app_id, "restart")
+        ok = False
+        for _ in range(40):
+            time.sleep(1)
+            if port and port_up(port):
+                ok = True
+                break
+        with open(LOG, "a") as f:
+            f.write(("%s l\u00e4uft wieder (Port %s).\n" % (app_id, port)) if ok else
+                    ("WARNUNG: %s antwortet nach 40 s nicht auf Port %s - Protokoll mit logread pr\u00fcfen.\n" % (app_id, port)))
+    finally:
+        _restoring = False
 
 
 def build_zip(app_id):
@@ -1627,8 +1662,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, json.dumps(dict(error="unbekannte Anwendung")))
             ok = start_uninstall(target, mode)
             return self._send(200 if ok else 409, json.dumps(dict(started=ok)))
-        if u.path == "/api/restore":
+        if u.path == "/api/restart":
             global _restoring
+            aid = urllib.parse.parse_qs(u.query).get("id", [""])[0]
+            known = [a["id"] for a in load_apps() if os.path.exists(os.path.join(APPS_DIR, a["id"], ".nc_ok"))]
+            if aid != "mosquitto" and aid not in known:
+                return self._send(404, json.dumps(dict(error="Anwendung nicht installiert")))
+            if not svc_for(aid):
+                return self._send(404, json.dumps(dict(error="kein Autostart-Dienst gefunden")))
+            with _lock:
+                if running():
+                    return self._send(409, json.dumps(dict(started=False)))
+                _restoring = True
+            threading.Thread(target=restart_service, args=(aid,), daemon=True).start()
+            return self._send(200, json.dumps(dict(started=True)))
+        if u.path == "/api/restore":
             aid, q = self._app_id()
             length = int(self.headers.get("Content-Length") or 0)
             if not aid:
