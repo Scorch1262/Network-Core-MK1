@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-#  Netzwerk-Core Installer v1.7.5 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
+#  Netzwerk-Core Installer v1.7.6 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
 #
 #  Einmal per SSH ausfuehren:   sh netzwerk-core-install.sh
 #
@@ -86,6 +86,11 @@ OWNER=Scorch1262
 CONF="$BASE/apps.conf"
 
 log() { echo "[$(date '+%F %T')] $*"; }
+
+# Datei nur kopieren, wenn das Ziel sie noch nicht hat (BusyBox-cp kennt kein "-n")
+cp_n() {   # quelle zielordner
+    [ -e "$2/$(basename "$1")" ] || cp "$1" "$2/"
+}
 
 # curl mit optionalem GitHub-Token (Datei $BASE/github_token, fuer private Repos)
 gh_curl() {
@@ -385,7 +390,13 @@ adopt_app() {   # id  -> 0 = uebernommen
     echo "$svcs" | sed '/^$/d' > "$BASE/adopted/$id.svc"
     if [ -n "$nport" ]; then echo "$nport" > "$BASE/adopted/$id.port"; else rm -f "$BASE/adopted/$id.port"; fi
     echo "$(app_field "$id" 3)" > "$appdir/.nc_repo"
-    [ -n "$wd" ] && echo "$wd" > "$appdir/.nc_workdir"
+    if [ -n "$wd" ]; then
+        case "$wd" in
+            "$dir") echo "$appdir" > "$appdir/.nc_workdir" ;;
+            "$dir"/*) echo "$appdir${wd#$dir}" > "$appdir/.nc_workdir" ;;
+            *) echo "$wd" > "$appdir/.nc_workdir" ;;
+        esac
+    fi
     echo adopted > "$appdir/.nc_sha"
     touch "$appdir/.nc_ok"
     unmark_removed "$id"
@@ -460,7 +471,7 @@ deploy_app() {   # id
         log "Repo-Wechsel $oldrepo -> $repo: Einstellungen werden uebernommen"
         mkdir -p "$tmp/keep"
         oldwd=$(cat "$appdir/.nc_workdir" 2>/dev/null); [ -d "$oldwd" ] || oldwd="$appdir"
-        for f in "$oldwd"/*.json "$appdir"/*.json; do [ -f "$f" ] && cp -n "$f" "$tmp/keep/"; done
+        for f in "$oldwd"/*.json "$appdir"/*.json; do [ -f "$f" ] && cp_n "$f" "$tmp/keep"; done
         /etc/init.d/nc-$id stop 2>/dev/null
         find "$appdir" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
     fi
@@ -523,13 +534,16 @@ deploy_app() {   # id
     workdir="$appdir"; [ -n "$subdir" ] && workdir="$appdir/$subdir"
     workdir=$(pick_workdir "$workdir")
     if [ -d "$tmp/keep" ]; then
-        for f in "$tmp"/keep/*.json; do [ -f "$f" ] && cp -n "$f" "$workdir/"; done
+        for f in "$tmp"/keep/*.json; do [ -f "$f" ] && cp_n "$f" "$workdir"; done
     fi
     old=$(cat "$appdir/.nc_workdir" 2>/dev/null)
-    if [ -n "$old" ] && [ "$old" != "$workdir" ] && [ -d "$old" ]; then
+    # Alter Programmordner nur loeschen, wenn er wirklich ein anderer ist (nie bei uebernommenen Installationen:
+    # dort zeigt apps/<id> per Verknuepfung auf den Originalordner)
+    oldr=$(readlink -f "$old" 2>/dev/null); newr=$(readlink -f "$workdir" 2>/dev/null)
+    if [ -n "$old" ] && [ -d "$old" ] && [ "$oldr" != "$newr" ]; then
         log "Neuer Versionsordner - uebernehme Einstellungen aus $old"
-        for f in "$old"/*.json; do [ -f "$f" ] && cp -n "$f" "$workdir/"; done
-        rm -rf "$old"
+        for f in "$old"/*.json; do [ -f "$f" ] && cp_n "$f" "$workdir"; done
+        if [ ! -L "$appdir" ] && [ ! -e "$BASE/adopted/$id.dir" ]; then rm -rf "$old"; fi
     fi
     echo "$workdir" > "$appdir/.nc_workdir"
     entry=$(resolve_entry "$workdir" "$entry")
@@ -1009,7 +1023,7 @@ cat > "$BASE/bin/nc-core.py" <<'NC_CORE_EOF'
 import json, os, re, shutil, socket, subprocess, threading, time, urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-NC_VERSION = "1.7.5"
+NC_VERSION = "1.7.6"
 BASE = os.environ.get("NC_BASE", "/root/Netzwerk-Core")
 PORT = int(os.environ.get("NC_PORT", "8090"))
 OWNER = "Scorch1262"
