@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-#  Netzwerk-Core Installer v1.7.6 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
+#  Netzwerk-Core Installer v1.7.7 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
 #
 #  Einmal per SSH ausfuehren:   sh netzwerk-core-install.sh
 #
@@ -14,7 +14,7 @@
 #  fuehrt sie im Update-Modus (NC_SELF_UPDATE=1) aus: Hilfsskripte, Statusseite
 #  und App-Liste werden erneuert, Netzwerk und App-Daten bleiben unberuehrt.
 #
-#  Installiert: nano, mosquitto, 15 Anwendungen aus GitHub (Scorch1262),
+#  Installiert: nano, mosquitto, 16 Anwendungen aus GitHub (Scorch1262),
 #  je Anwendung einen Autostart (procd) und die Statusseite "Netzwerk-Core"
 #  (Port 8090) mit Kacheln und Update-Buttons.
 #  Schlaegt etwas wegen fehlendem Internet fehl, laeuft die Installation beim
@@ -55,6 +55,7 @@ ablaufplan|Ablaufplan-Editor|AblaufplanEditor-MK1|8089|app.py|||Ablaufplaene ers
 overwatch|OverWatch MK2|OverWatch-MK2|8094|main.py|||Lagekarte mit ADS-B, FLARM und Starlink|--no-sms
 bambu|Drucker-Dashboard|BambuLab-MQTT-Dashboard-MK6|8000|app.py|||Bambu Lab / Ultimaker / OctoPrint / Formlabs
 outfit|Wetter-Outfit|Wetter-Outfit-Dashboard-MK1|8095|app.py|||Outfit-Vorschlaege nach Wetter und Aktivitaet
+sysmon|System-Monitor MQTT|System-Monitor-MQTT-MK1|8096|main.py|||Systemwerte (CPU, RAM, Temperaturen, Lueftung) des Routers per MQTT senden|--service
 kachel|MQTT Kachel-Dashboard|MQTT-Kachel-Dashboard-MK1|8085|app.py|||MQTT-Topics als Kacheln mit Symbolen und Schwellwerten|
 klingel|Klingelbildschirm|MQTT-Klingelbildschirm-MK3|8081|@install.sh|||Klingel-Dashboard mit Kamerabild und Tueroeffner (Einrichtung: Port 8083)|
 chat|Netzwerk-Chat|Netzwerk-Chat-MK1|8092|netzwerk_chat.py|||Chat fuer alle Teilnehmer im Netzwerk|--port 8092 --host 0.0.0.0
@@ -201,9 +202,35 @@ NC_PYYAML_EOF
 }
 
 # Anwendungen, deren Web-Port in einer Konfigurationsdatei steht (nicht per Argument)
-PORT_CFG_IDS="netzwerkplan rohrleitung kabelmanager ablaufplan overwatch"
+PORT_CFG_IDS="netzwerkplan rohrleitung kabelmanager ablaufplan overwatch sysmon"
+# Port in System-Monitor-MQTT-MK1.json ("web.port") setzen; Datei wird bei Bedarf angelegt (Standardport 8095 ist belegt)
+set_sysmon_port() {   # datei port
+    python3 - "$1" "$2" <<'NC_PYSYSMON_EOF'
+import json, os, sys
+p, port = sys.argv[1], int(sys.argv[2])
+try:
+    j = json.load(open(p, encoding="utf-8-sig")) if os.path.exists(p) else {}
+    if not isinstance(j, dict):
+        raise ValueError
+except Exception:
+    print("error"); sys.exit(0)
+w = j.get("web")
+if not isinstance(w, dict):
+    w = j["web"] = {}
+if w.get("port") == port:
+    sys.exit(0)
+w["port"] = port
+tmp = p + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(j, f, indent=2, ensure_ascii=False)
+os.replace(tmp, p)
+print("changed")
+NC_PYSYSMON_EOF
+}
+
 set_app_port() {   # id workdir port
     case "$1" in
+        sysmon) set_sysmon_port "$2/System-Monitor-MQTT-MK1.json" "$3" ;;
         netzwerkplan|rohrleitung|kabelmanager|ablaufplan) set_json_port "$2/config.json" "$3" ;;
         overwatch) set_yaml_port "$2/config.yaml" "$3" ;;
     esac
@@ -234,7 +261,7 @@ fetch_repo() {   # repo tmpdir
 # Dateien, die beim Update NICHT ueberschrieben werden (Nutzerdaten)
 is_preserved() {
     case "$1" in
-        config.json|*/config.json|markers.json|*/markers.json|config.yaml|*/config.yaml|*.mbtiles) return 0 ;;
+        System-Monitor-MQTT-MK1.json|*/System-Monitor-MQTT-MK1.json|config.json|*/config.json|markers.json|*/markers.json|config.yaml|*/config.yaml|*.mbtiles) return 0 ;;
         *.db|*.sqlite|*.sqlite3) return 0 ;;
         data/*|*/data/*|daten/*|*/daten/*|uploads/*|*/uploads/*) return 0 ;;
         print_history/*|*/print_history/*) return 0 ;;
@@ -285,6 +312,7 @@ python_deps() {
         grep -q -E '^[[:space:]]*(import|from)[[:space:]]+flask' "$workdir"/*.py 2>/dev/null && echo flask >> "$tmp/req.txt"
         grep -q -E '^[[:space:]]*(import|from)[[:space:]]+paho' "$workdir"/*.py 2>/dev/null && echo paho-mqtt >> "$tmp/req.txt"
     fi
+    [ "$id" = "sysmon" ] && : > "$tmp/req.txt"    # requirements.txt gilt nur fuer Windows; unter Linux reicht python3
     if ! grep -q '[^[:space:]]' "$tmp/req.txt"; then
         mkdir -p "$appdir/.pylibs"     # nur Standardbibliothek noetig
         echo none > "$appdir/.nc_req"
@@ -920,12 +948,14 @@ def main(argv):
     if ports:
         port = cport if cport in ports else min(ports)
     elif wd:
-        for cf in (os.path.join(wd, "config.json"), os.path.join(d, "config.json")):
+        for cf in (os.path.join(wd, "config.json"), os.path.join(d, "config.json"),
+                   os.path.join(wd, base + ".json"), os.path.join(d, base + ".json")):
             try:
                 j = json.load(open(cf, encoding="utf-8-sig"))
             except Exception:
                 continue
             v = (j.get("server") or {}).get("port") if isinstance(j.get("server"), dict) else None
+            v = v or (j.get("web") or {}).get("port") if isinstance(j.get("web"), dict) else v
             v = v or j.get("port")
             try:
                 v = int(v)
@@ -1023,7 +1053,7 @@ cat > "$BASE/bin/nc-core.py" <<'NC_CORE_EOF'
 import json, os, re, shutil, socket, subprocess, threading, time, urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-NC_VERSION = "1.7.6"
+NC_VERSION = "1.7.7"
 BASE = os.environ.get("NC_BASE", "/root/Netzwerk-Core")
 PORT = int(os.environ.get("NC_PORT", "8090"))
 OWNER = "Scorch1262"
@@ -1409,7 +1439,7 @@ const GROUPS=[
   ['IoT / SmartHome',['mosquitto','flow','dashboard','makro','diagram','kachel','klingel','homekit']],
   ['Planungs Tools',['netzwerkplan','rohrleitung','kabelmanager','ablaufplan']],
   ['Werkstatt',['bambu']],
-  ['Sonstiges',['overwatch','outfit','chat']]];
+  ['Sonstiges',['overwatch','outfit','chat','sysmon']]];
 function closeModal(){openId=null;helpOpen=false;openSig='';$('#modal').hidden=true;}
 function fmtSize(n){return n>=1048576?(n/1048576).toFixed(1)+' MB':n>=1024?Math.round(n/1024)+' KB':n+' B';}
 function render(d){
@@ -1598,7 +1628,7 @@ BACKUP_DIR = os.path.join(BASE, "backup-data")
 TMP_DIR = os.path.join(BASE, "tmp")
 MAX_UPLOAD = 300 * 1024 * 1024
 DATA_DIRS = ("data", "daten", "uploads", "print_history")
-DATA_NAMES = ("config.json", "markers.json", "config.yaml")
+DATA_NAMES = ("config.json", "markers.json", "config.yaml", "System-Monitor-MQTT-MK1.json")
 SKIP_DIRS = {".pylibs", "node_modules", "__pycache__", ".git", "logs", "log", "cache", ".cache", "tmp"}
 SKIP_NAMES = {"package-lock.json"}
 # Dateien ausserhalb des Programmordners (eigene Installation der Anwendung)
