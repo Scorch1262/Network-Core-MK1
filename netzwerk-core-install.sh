@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-#  Netzwerk-Core Installer v1.7.7 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
+#  Netzwerk-Core Installer v1.7.8 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
 #
 #  Einmal per SSH ausfuehren:   sh netzwerk-core-install.sh
 #
@@ -14,7 +14,7 @@
 #  fuehrt sie im Update-Modus (NC_SELF_UPDATE=1) aus: Hilfsskripte, Statusseite
 #  und App-Liste werden erneuert, Netzwerk und App-Daten bleiben unberuehrt.
 #
-#  Installiert: nano, mosquitto, 16 Anwendungen aus GitHub (Scorch1262),
+#  Installiert: nano, mosquitto, 17 Anwendungen aus GitHub (Scorch1262),
 #  je Anwendung einen Autostart (procd) und die Statusseite "Netzwerk-Core"
 #  (Port 8090) mit Kacheln und Update-Buttons.
 #  Schlaegt etwas wegen fehlendem Internet fehl, laeuft die Installation beim
@@ -55,6 +55,7 @@ ablaufplan|Ablaufplan-Editor|AblaufplanEditor-MK1|8089|app.py|||Ablaufplaene ers
 overwatch|OverWatch MK2|OverWatch-MK2|8094|main.py|||Lagekarte mit ADS-B, FLARM und Starlink|--no-sms
 bambu|Drucker-Dashboard|BambuLab-MQTT-Dashboard-MK6|8000|app.py|||Bambu Lab / Ultimaker / OctoPrint / Formlabs
 outfit|Wetter-Outfit|Wetter-Outfit-Dashboard-MK1|8095|app.py|||Outfit-Vorschlaege nach Wetter und Aktivitaet
+solar|Huawei-Solar-Dashboard|Huawei-Solar-Dashboard-MK1|8093|app.py|||Huawei-Wechselrichter und Akkus: Webseite und MQTT
 sysmon|System-Monitor MQTT|System-Monitor-MQTT-MK1|8096|main.py|||Systemwerte (CPU, RAM, Temperaturen, Lueftung) des Routers per MQTT senden|--service
 kachel|MQTT Kachel-Dashboard|MQTT-Kachel-Dashboard-MK1|8085|app.py|||MQTT-Topics als Kacheln mit Symbolen und Schwellwerten|
 klingel|Klingelbildschirm|MQTT-Klingelbildschirm-MK3|8081|@install.sh|||Klingel-Dashboard mit Kamerabild und Tueroeffner (Einrichtung: Port 8083)|
@@ -202,7 +203,7 @@ NC_PYYAML_EOF
 }
 
 # Anwendungen, deren Web-Port in einer Konfigurationsdatei steht (nicht per Argument)
-PORT_CFG_IDS="netzwerkplan rohrleitung kabelmanager ablaufplan overwatch sysmon"
+PORT_CFG_IDS="netzwerkplan rohrleitung kabelmanager ablaufplan overwatch sysmon solar"
 # Port in System-Monitor-MQTT-MK1.json ("web.port") setzen; Datei wird bei Bedarf angelegt (Standardport 8095 ist belegt)
 set_sysmon_port() {   # datei port
     python3 - "$1" "$2" <<'NC_PYSYSMON_EOF'
@@ -231,6 +232,7 @@ NC_PYSYSMON_EOF
 set_app_port() {   # id workdir port
     case "$1" in
         sysmon) set_sysmon_port "$2/System-Monitor-MQTT-MK1.json" "$3" ;;
+        solar) set_sysmon_port "$2/config.json" "$3" ;;
         netzwerkplan|rohrleitung|kabelmanager|ablaufplan) set_json_port "$2/config.json" "$3" ;;
         overwatch) set_yaml_port "$2/config.yaml" "$3" ;;
     esac
@@ -1053,7 +1055,7 @@ cat > "$BASE/bin/nc-core.py" <<'NC_CORE_EOF'
 import json, os, re, shutil, socket, subprocess, threading, time, urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-NC_VERSION = "1.7.7"
+NC_VERSION = "1.7.8"
 BASE = os.environ.get("NC_BASE", "/root/Netzwerk-Core")
 PORT = int(os.environ.get("NC_PORT", "8090"))
 OWNER = "Scorch1262"
@@ -1436,7 +1438,7 @@ let busy=false;
 function el(t,c,x){const e=document.createElement(t);if(c)e.className=c;if(x!==undefined)e.textContent=x;return e;}
 let last=null,openId=null,helpOpen=false,openSig='';
 const GROUPS=[
-  ['IoT / SmartHome',['mosquitto','flow','dashboard','makro','diagram','kachel','klingel','homekit']],
+  ['IoT / SmartHome',['mosquitto','flow','dashboard','makro','diagram','kachel','klingel','homekit','solar']],
   ['Planungs Tools',['netzwerkplan','rohrleitung','kabelmanager','ablaufplan']],
   ['Werkstatt',['bambu']],
   ['Sonstiges',['overwatch','outfit','chat','sysmon']]];
