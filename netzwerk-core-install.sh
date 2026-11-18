@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-#  Netzwerk-Core Installer v1.7.8 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
+#  Netzwerk-Core Installer v1.7.9 fuer GL.iNet Brume 2 (GL-MT2500 / OpenWrt)
 #
 #  Einmal per SSH ausfuehren:   sh netzwerk-core-install.sh
 #
@@ -1055,7 +1055,7 @@ cat > "$BASE/bin/nc-core.py" <<'NC_CORE_EOF'
 import json, os, re, shutil, socket, subprocess, threading, time, urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-NC_VERSION = "1.7.8"
+NC_VERSION = "1.7.9"
 BASE = os.environ.get("NC_BASE", "/root/Netzwerk-Core")
 PORT = int(os.environ.get("NC_PORT", "8090"))
 OWNER = "Scorch1262"
@@ -1131,6 +1131,16 @@ def app_version(wd, appdir=""):
         m = VER_RE.search(read(os.path.join(wd, f)))
         if m:
             return m.group(1)
+    # Version in einem Unterordner, z. B. app/version.py (System-Monitor MQTT)
+    try:
+        subs = sorted(x for x in os.listdir(wd) if os.path.isdir(os.path.join(wd, x)) and not x.startswith("."))
+    except OSError:
+        subs = []
+    for x in subs:
+        for n in ("version.py", "_version.py", "__init__.py"):
+            m = VER_RE.search(read(os.path.join(wd, x, n), 20000))
+            if m:
+                return m.group(1)
     for d in (wd, appdir):
         if d:
             m = CHL_RE.search(read(os.path.join(d, "CHANGELOG.md"), 20000))
